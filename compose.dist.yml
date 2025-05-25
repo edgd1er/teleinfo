@@ -1,0 +1,91 @@
+services:
+  teleinfo:
+    image: edgd1er/teleinfo:latest
+    container_name: teleinfo
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        DEBUG: true
+    privileged: true
+    environment:
+      TZ: "Europe/Paris"
+      DEBUG: True
+      #KEYS: "[ ISOUSC, BASE, IINST, ADPS, IMAX, MOTDETAT ]" # Mode historique
+      KEYS : "[ ADSC, DATE, VTIC, NGTF,EAST,PREF, PCOUP, SINSTS, MSG1, IRMS, URMS, SMAXSN, SMAXSN-1 ]" #Mode Standard
+      LEGACY: False #True=historique, False=standard
+      CHECKSUM: 2 #1 ou 2
+      CITY: "Paris" #utilisé par influxdb
+      INFLUX_SEND: "False"
+      INFLUX_URL: ""
+      INFLUX_BUCKET: ""
+      INFLUX_TOKEN: ""
+      INFLUX_ORG: ""
+      MYSQL_SEND: true
+      MYSQL_HOST: "mysql"
+      MYSQL_PORT: 3306
+      MYSQL_USERNAME: "linky"
+      MYSQL_PASSWORD: "linky"
+      MYSQL_DB: "linky"
+      MQTT_SEND: true
+      MQTT_HOST: "mqtt"
+      MQTT_PORT: 1883
+      MQTT_TOPIC: "linky"
+      MQTT_USERNAME: "linky"
+      MQTT_PASSWORD: "linky"
+    devices:
+      # ttyS0: pi3+>
+      #- /dev/ttyS0:/dev/ttyserial0
+      # ttyAMA0: pi2
+      - /dev/ttyAMA0:/dev/ttyserial0
+    cap_add:
+      - SYS_ADMIN
+    labels:
+      com.centurylinklabs.watchtower.enable: true
+    logging:
+      driver: json-file
+      options: {}
+    ports:
+      - 0.0.0.0:8181:8181/tcp
+    restart: unless-stopped
+    volumes:
+      - ./config:/config
+
+  mysql:
+    image : biarms/mysql:5
+    restart : unless-stopped
+    expose :
+      - "3306"
+    ports :
+      - "3306:3306"
+    mem_limit : 1G
+    labels :
+      com.centurylinklabs.watchtower.enable : "true"
+    environment :
+      - TZ=Europe/Paris
+      - MYSQL_ROOT_PASSWORD=root
+      - MYSQL_DATABASE=linky
+      - MYSQL_USER=linky
+      - MYSQL_PASSWORD=linky
+    volumes :
+      - data:/var/lib/mysql
+      - run_mysql:/run
+    logging :
+      driver : "json-file"
+      options :
+        max-size : "200k"
+        max-file : "10"
+
+  mqtt:
+    image : acuparse/mqtt
+    restart : unless-stopped
+    ports :
+      - "1883:1883"
+    labels :
+      com.centurylinklabs.watchtower.enable : "true"
+    environment:
+      TZDATA: "Europe/Paris"
+
+volumes:
+  data:
+  run_mysql:
