@@ -172,14 +172,11 @@ def _handler(signum, frame):
   raise SystemExit(0)
 
 
-def _checksum(key, val, separator, checksum, linky_checksum_method):
-  """Vérifie la somme de contrôle du groupe d'information. Réf Enedis-NOI-CPT_02E, page 19."""
-  data = f'{key}{separator}{val}'
-  if linky_checksum_method == 2:
-    data += separator
-  s = sum([ord(c) for c in data])
-  s = (s & 0x3F) + 0x20
-  return (checksum == chr(s))
+def _checksum(data, checksum):
+  """Vérifie la somme de contrôle du groupe d'information. Réf Enedis-NOI-CPT_54E, page 14."""
+  s1 = sum([ord(c) for c in data])
+  s2 = (s1 & 0x3F) + 0x20
+  return (checksum == chr(s2))
 
 
 def _send_frames_to_influx(influxdb_frame_queue: Queue = None, influxdb_bucket=None, write_client=None):
@@ -355,6 +352,88 @@ def _send_data_to_mqtt(mymqttclient: mqtt_client = None, myframe_queue: Queue = 
       mymqttclient.publish(mqtt_topic, payload=payload, qos=mqtt_qos, retain=mqtt_retain)
 
 
+#####################################################################################################################
+# -------------------------------------------------------------------------------------------------------------
+# |                                 Etendue d'un groupe d'information                                         |
+# -------------------------------------------------------------------------------------------------------------
+# | LF (0x0A) | Champ 'étiquette' | Séparateur* | Champ 'donnée' | Séparateur* | Champ 'contrôle' | CR (0x0D) |
+# -------------------------------------------------------------------------------------------------------------
+#             | Etendue checksum mode n°1                        |                                            |
+# -------------------------------------------------------------------------------------------------------------
+#             | Etendue checksum mode n°2                                      |                              |
+# -------------------------------------------------------------------------------------------------------------
+#
+
+def process_teleinfo(bytes: bytes = None):
+  # Initialisation d'une trame vide
+  frame = dict()
+
+  # un caractère "Line Feed" LF (0x0 A) indiquant le début du groupe => split sur ce separateur.
+  datasets = list(filter(lambda x: len(x) > 1, bytes.split(b'\n')))
+
+  logger.debug(f'#datasets: {len(datasets)}')
+  for i, dataset in enumerate(datasets):
+    # un caractère "Carriage Return" CR (0x0 D) indiquant la fin du groupe d'information => suppression du cr
+    str_dataset = dataset.decode('ascii').strip('\r')
+    logger.debug(f'datasets[{i}]: {str_dataset}')
+
+    # Identification du séparateur en vigueur (espace ou tabulation) #bug in PFJOUR+1
+    separator = str_dataset[-2] if str_dataset[-2] in ['\t', ' '] else '\t'
+    splitted_dataset = str_dataset.split(separator)
+    key = splitted_dataset[0]
+    idx = 1
+    if len(splitted_dataset) < 2:
+      logger.error(f'format incorrect de la trame, nb: {len(splitted_dataset)}<2, str: {dataset.decode("ascii")}')
+      return None
+    # Horodatage présent, on décale
+    if len(splitted_dataset) >3:
+      idx = 2
+    val = splitted_dataset[idx]
+    #pas de donnée pour date mais un horodatage
+    if key == 'DATE':
+      val = splitted_dataset[idx-1]
+
+    checksum = splitted_dataset[idx + 1][0]
+
+    # Est-ce une étiquette qui nous intéresse ?
+    if key in linky_keys or linky_keys[0] == "ALL":
+      #logger.debug(f'captured decoded key #{i}: {key}={val}')
+
+      # Vérification de la somme de contrôle
+      if key in linky_ignore_checksum_for_keys or _checksum(str_dataset[0:-1], checksum):
+        # Ajout de la valeur
+        frame[key] = val
+      else:
+        logger.warning(f'Somme de contrôle erronée pour {key}, checksum: {checksum} / dataset: {dataset}')
+
+  num_keys = len(frame)
+  logger.info(f'Trame reçue ({num_keys} étiquettes traités)')
+  #for i,(k,v) in enumerate(frame.items()):
+  #  logger.debug(f'frame[{i}]: {k}={v}')
+
+
+  # Horodatage de la trame reçue
+  frame['TIME'] = datetime.now().strftime("%Y-%m-%dT%H:%M:%SZ")
+  logger.debug(f'FRAME: {frame}')
+  # Ajout à la queue d'envoi vers InfluxDB
+  if influxdb_send_data:
+    frame_influxdb_queue.put(frame)
+    if frame_influxdb_queue.qsize() > 1:
+      logger.debug(f'influxdb queue: {frame_influxdb_queue.qsize()}')
+
+  # Ajout à la queue d'envoi vers mysql
+  if mysql_send_data:
+    frame_mysql_queue.put(frame)
+    if frame_mysql_queue.qsize() > 1:
+      logger.warning(f'mysql queue: {frame_mysql_queue.qsize()}')
+
+  # Ajout à la queue d'envoi vers mqtt
+  if mqtt_send_data:
+    frame_mqtt_queue.put(frame)
+    if frame_mqtt_queue.qsize() > 1:
+      logger.warning(f'mqtt queue: {frame_mqtt_queue.qsize()}')
+
+
 def linky(log_level=logging.INFO):
   logger = logging.getLogger('linky')
   logger.setLevel(log_level)
@@ -363,117 +442,35 @@ def linky(log_level=logging.INFO):
     baudrate = 1200 if linky_legacy_mode else 9600
     logger.info(
       f'Ouverture du port série {raspberry_stty_port} à {baudrate} Bd')
-    with serial.Serial(port=raspberry_stty_port,
-                       baudrate=baudrate,
-                       parity=serial.PARITY_EVEN,
-                       stopbits=serial.STOPBITS_ONE,
-                       bytesize=serial.SEVENBITS,
-                       timeout=1) as ser:
+    ser = serial.Serial(port=raspberry_stty_port,
+                        baudrate=baudrate,
+                        parity=serial.PARITY_EVEN,
+                        stopbits=serial.STOPBITS_ONE,
+                        bytesize=serial.SEVENBITS,
+                        timeout=1)
 
-      # Boucle pour partir sur un début de trame
-      logger.info(f'linky_keys: {linky_keys}, ignore checksum for keys: {linky_ignore_checksum_for_keys}')
-      logger.info('Attente d\'une première trame...')
-      line = ser.readline()
-      while START_FRAME not in line:  # Recherche du caractère de début de trame, c'est-à-dire STX 0x02
-        line = ser.readline()
-        logger.debug(f'line waiting for start: {line}')
-
-      # Initialisation d'une trame vide
-      frame = dict()
-
-      # Boucle infinie
-      while True:
-
-        # -------------------------------------------------------------------------------------------------------------
-        # |                                 Etendue d'un groupe d'information                                         |
-        # -------------------------------------------------------------------------------------------------------------
-        # | LF (0x0A) | Champ 'étiquette' | Séparateur* | Champ 'donnée' | Séparateur* | Champ 'contrôle' | CR (0x0D) |
-        # -------------------------------------------------------------------------------------------------------------
-        #             | Etendue checksum mode n°1                        |                                            |
-        # -------------------------------------------------------------------------------------------------------------
-        #             | Etendue checksum mode n°2                                      |                              |
-        # -------------------------------------------------------------------------------------------------------------
-        #
-        # *Le séparateur peut être SP (0x20) ou HT (0x09)
-
-        try:
-          # Lecture de la première ligne de la première trame
-          # line = ser.readline()
-
-          # Décodage ASCII et nettoyage du retour à la ligne
-          line_str = line.decode('ascii').rstrip()
-          # logger.debug(f'Groupe d\'information brut : {line_str}')
-
-          # Récupération de la somme de contrôle (qui est le dernier caractère de la ligne)
-          # checksum = line_str[-1]
-
-          # Identification du séparateur en vigueur (espace ou tabulation) #bug in PFJOUR+1
-          separator = line_str[-2] if line_str[-2] in ['\t', ' '] else "\t"
-
-          splitted_line = line_str.split(separator)
-          key = splitted_line[0]
-          idx = 1
-          if len(splitted_line) < 2:
-            logger.error(f'format incorrect de la trame, nb: {len(splitted_line)}<2, str: {line_str}')
-          else:
-            # Horodatage présent, on décale
-            if len(splitted_line) == 4:
-              idx = 2
-            val = splitted_line[idx]
-            checksum = splitted_line[idx + 1][0]
-
-            # Est-ce une étiquette qui nous intéresse ?
-            if key in linky_keys or linky_keys[0] == "ALL":
-              logger.debug(f'captured decoded key : {key}={val}')
-              # Vérification de la somme de contrôle
-              if key in linky_ignore_checksum_for_keys or _checksum(key, val, separator, checksum,
-                                                                    linky_checksum_method):
-                # Ajout de la valeur
-                frame[key] = val
-              else:
-                logger.warning(f'Somme de contrôle erronée pour {key} = {val}')
-
-          # Si caractère de fin de trame dans la ligne, on envoie les données vers le(s) endpoint demandé(s)
-          if STOP_FRAME in line:
-            num_keys = len(frame)
-            logger.debug(f'Trame reçue ({num_keys} étiquettes traités)')
-
-            # Horodatage de la trame reçue
-            frame['TIME'] = datetime.now().strftime("%Y-%m-%dT%H:%M:%SZ")
-
-            logger.debug(f'FRAME: {frame}')
-            # Ajout à la queue d'envoi vers InfluxDB
-            if influxdb_send_data:
-              frame_influxdb_queue.put(frame)
-              if frame_influxdb_queue.qsize() > 1:
-                logger.debug(f'influxdb queue: {frame_influxdb_queue.qsize()}')
-
-            # Ajout à la queue d'envoi vers mysql
-            if mysql_send_data:
-              frame_mysql_queue.put(frame)
-              if frame_mysql_queue.qsize() > 1:
-                logger.warning(f'mysql queue: {frame_mysql_queue.qsize()}')
-
-            # Ajout à la queue d'envoi vers mqtt
-            if mqtt_send_data:
-              frame_mqtt_queue.put(frame)
-              if frame_mqtt_queue.qsize() > 1:
-                logger.warning(f'mqtt queue: {frame_mqtt_queue.qsize()}')
-
-            # On réinitialise une nouvelle trame
-            frame = dict()
-            time.sleep(linky_sleep_interval)
-          line = ser.readline()
-
-        except Exception as e:
-          logger.error(f'Etiquette : {key}  Donnée : {val}')
-          logger.error(f'Une exception s\'est produite : {e}', exc_info=True)
-
-  except termios.error:
-    logger.error('Erreur lors de la configuration du port série')
-    if raspberry_stty_port == '/dev/ttyS0':
-      logger.error('Essayez d\'utiliser /dev/ttyAMA0 plutôt que /dev/ttyS0')
-    raise SystemExit(1)
+    # Boucle pour partir sur un début de trame
+    logger.info(f'linky_keys: {linky_keys}, ignore checksum for keys: {linky_ignore_checksum_for_keys}')
+    logger.info('Attente d\'une première trame...')
+    while True:
+      error = 0
+      not_wanted_line = ser.read_until(START_FRAME)
+      logger.debug(f'nouvelle trame trouvée, ignore: {not_wanted_line}')
+      wanted_bytes_line = ser.read_until(STOP_FRAME)  # Recherche du caractère de début de trame, c'est-à-dire STX 0x02
+      # nouveau dataset demarre avec un LF (10)
+      if wanted_bytes_line[0] != 0x0a:
+        logger.error(f'wanted_bytes_line ne demarre pas avec un LF: {wanted_bytes_line[0]}')
+        error = 1
+      # dataset termine avec CR(13) sauf si bug
+      if wanted_bytes_line[-1] not in [0x0d, 0x03]:
+        logger.error(f'wanted_bytes_line ne finit pas avec un CR: {wanted_bytes_line[-1]}')
+        error = 1
+      if error == 0:
+        #remove terminal \x03
+        process_teleinfo(wanted_bytes_line[0:-1])
+      else:
+        logger.error(f'Cannot process: {wanted_bytes_line}')
+      time.sleep(linky_sleep_interval)
 
   except serial.SerialException as exc:
     if exc.errno == 13:
@@ -484,7 +481,18 @@ def linky(log_level=logging.INFO):
         'Vous devez vous déconnecter de votre session puis vous reconnecter pour que les droits prennent effet.')
     else:
       logger.error(f'Erreur lors de l\'ouverture du port série : {exc}')
+    ser.close()
     raise SystemExit(1)
+
+  except termios.error:
+    logger.error('Erreur lors de la configuration du port série')
+    if raspberry_stty_port == '/dev/ttyS0':
+      logger.error('Essayez d\'utiliser /dev/ttyAMA0 plutôt que /dev/ttyS0')
+    ser.close()
+    raise SystemExit(1)
+
+  finally:
+    ser.close()
 
 
 def read_conf(conffile: str = "", debug: bool = False):
