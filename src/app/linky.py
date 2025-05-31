@@ -3,7 +3,7 @@
 # -*- coding: utf-8 -*-
 # __author__ = "Hervé Le Roy"
 # __licence__ = "GNU General Public License v3.0"
-
+import json
 #  apt install -y python3-serial python3-mysqldb python3-influxdb
 # Python 3, pré-requis : pip install PyYAML pySerial influxdb-client
 
@@ -37,6 +37,7 @@ logger = logging.getLogger(__name__)
 LDIR = os.path.dirname(os.path.realpath(__file__))
 DEFAULT_KEYS = ('ISOUSC', 'BASE', 'IINST',)
 DEFAULT_CHECKSUM_METHOD = 1
+DEFAULT_INTERVAL = 60
 
 START_FRAME = b'\x02'  # STX, Start of Text
 STOP_FRAME = b'\x03'  # ETX, End of Text
@@ -44,8 +45,9 @@ STOP_FRAME = b'\x03'  # ETX, End of Text
 
 #################################################################################################
 # prepare connection to db
-def create_influxdb_client_and_thread(influxdb_url, influxdb_token, influxdb_org, linky_location, influxdb_bucket,
-                                      myframe_queue):
+def create_influxdb_client_and_thread(influxdb_url: str = "", influxdb_token: str = "", influxdb_org: str = "",
+                                      linky_location: str = "Paris", influxdb_bucket: str = "",
+                                      myframe_queue: Queue = None):
   # Connexion à InfluxDB
   try:
     logger.info(f'Connexion à {influxdb_url}')
@@ -63,10 +65,13 @@ def create_influxdb_client_and_thread(influxdb_url, influxdb_token, influxdb_org
   point_settings = PointSettings()
   point_settings.add_default_tag('location', linky_location)
   write_client = influxdb_client.write_api(write_options=SYNCHRONOUS, point_settings=point_settings)
+  if write_client is None:
+    logger.error(f'Cannot create influxdb client. Ignoring that export.')
+    influxdb_send_data = False
 
   # Démarrage du thread d'envoi vers InfluxDB
-  logger.debug(f'Démarrage du thread d\'envoi vers InfluxDB')
-  send_influx_thread = Process(target=_send_frames_to_influx, args=(myframe_queue, influxdb_bucket,),
+  logger.info(f'Démarrage du thread d\'envoi vers InfluxDB')
+  send_influx_thread = Process(target=_send_frames_to_influx, args=(myframe_queue, influxdb_bucket, write_client),
                                daemon=True)
   send_influx_thread.start()
   return write_client, send_influx_thread
@@ -87,33 +92,55 @@ def create_mysql_client_and_thread(mysql_host, mysql_port, mysql_username, mysql
     raise SystemExit(1)
 
   # Démarrage du thread d'envoi vers mysql
-  logger.debug(f'Démarrage du thread d\'envoi vers mysql')
+  logger.info(f'Démarrage du thread d\'envoi vers mysql')
   send_mysql_thread = Process(target=_send_data_to_mysql, args=(mycnx, myframe_queue,), daemon=True)
   send_mysql_thread.start()
   return mycnx, send_mysql_thread
 
 
 #################################################################################################"
-def create_mqtt_client_and_thread(mqtt_host, mqtt_port, mqtt_username, mqtt_password, mqtt_topic, myframe_mqtt_queue):
-  def on_connect(client, userdata, flags, rc):
-    # For paho-mqtt 2.0.0, you need to add the properties parameter.
-    # def on_connect(client, userdata, flags, rc, properties):
-    if rc == 0:
-      logger.info(f"Connected to MQTT Broker {mqtt_host}:{mqtt_port} on {mqtt_topic}")
-    else:
-      logger.error(f"Failed to connect to {mqtt_host}:{mqtt_port} on {mqtt_topic}, return code: {rc}")
-    # Set Connecting Client ID
+def on_connect(client, userdata, flags, rc):
+  # For paho-mqtt 2.0.0, you need to add the properties parameter.
+  # def on_connect(client, userdata, flags, rc, properties):
+  if rc == 0:
+    logger.info(f"Connected to MQTT Broker {mqtt_host}:{mqtt_port} on {client}")
+  else:
+    logger.error(f"Failed to connect to {mqtt_host}:{mqtt_port} on {client}, return code: {rc}")
+  # Set Connecting Client ID
 
+
+def on_publish(client, userdata, rc):
+  # Qos=0 fire and firget
+  # Qos=1 at least once
+  # Qos=2 only once
+  if userdata != None and rc != 0:
+    logger.error(f'Error ({rc}) publishing data: {userdata} on client {client}')
+  pass
+
+
+def on_disconnect(client, userdata, rc):
+  if userdata != None and rc != 0:
+    logger.debug(f"return code: {rc}, client disconnected: {userdata} on client {client} ")
+  pass
+
+
+def create_mqtt_client_and_thread(mqtt_host: str = None, mqtt_port: int = 1883, mqtt_username: str = "",
+                                  mqtt_password: str = "",
+                                  mqtt_topic: str = "mytopic", mqtt_qos: int = 0, mqtt_retain: bool = False,
+                                  mqtt_queue: Queue = None):
   client = mqtt_client.Client(f'linky-teleinfo-{random.randint(0, 1000)}')
   # For paho-mqtt 2.0.0, you need to set callback_api_version.
   # client = mqtt_client.Client(client_id=client_id, callback_api_version=mqtt_client.CallbackAPIVersion.VERSION2)
   client.username_pw_set(mqtt_username, mqtt_password)
   client.on_connect = on_connect
+  client.on_publish = on_publish
+  client.on_disconnect = on_disconnect
   client.connect(mqtt_host, mqtt_port)
 
   # Démarrage du thread d'envoi vers mysql
-  logger.debug(f'Démarrage du thread d\'envoi vers mqtt')
-  send_mqtt_thread = Process(target=_send_data_to_mqtt, args=(client, myframe_mqtt_queue), daemon=True)
+  logger.info(f'Démarrage du thread d\'envoi vers mqtt #{mqtt_topic}')
+  send_mqtt_thread = Process(target=_send_data_to_mqtt,
+                             args=(client, mqtt_queue, mqtt_topic, mqtt_qos, mqtt_retain), daemon=True)
   send_mqtt_thread.start()
 
   return client, send_mqtt_thread
@@ -128,12 +155,19 @@ def _handler(signum, frame):
   logger.info('Programme interrompu par CTRL+C')
   if influxdb_send_data:
     write_client.close()
+    frame_influxdb_queue.close()
+    send_influx_thread.join(5)
 
   if mysql_send_data:
     mysql_client.close()
+    frame_mysql_queue.close()
+    send_mysql_thread.join(5)
 
   if mqtt_send_data:
     mqtt_client.loop_stop()
+    mqtt_client.disconnect()
+    frame_mqtt_queue.close()
+    send_mqtt_thread.join(5)
 
   raise SystemExit(0)
 
@@ -151,8 +185,13 @@ def _checksum(key, val, separator, checksum, linky_checksum_method):
 def _send_frames_to_influx(influxdb_frame_queue: Queue = None, influxdb_bucket=None, write_client=None):
   """Ecrit les mesures dans un bucket InfluxDB."""
   logger.debug(f'Thread d\'envoi vers InfluxDB démarré')
+  if write_client is None:
+    logger.error(f'influxdb client is not defined')
+    influxdb_send_data = False
+  else:
+    influxdb_send_data = True
 
-  while True:
+  while True and influxdb_send_data:
     # Récupère une trame dans la file d'attente
     frameinflux = influxdb_frame_queue.get()
     if 'TIME' in frameinflux.keys():
@@ -218,104 +257,102 @@ def _send_data_to_mysql(mycnx=None, mysqlframe_queue=None):
     for measure, value in framemysql.items():
       item = {measure: value}
       record.append(item)
-    #logger.debug(f'items: {record}')
+    # logger.debug(f'items: {record}')
     mycursor = mycnx.cursor()
-    mycursor.execute('''CREATE TABLE IF NOT EXISTS puissance
+    mycursor.execute('''CREATE TABLE IF NOT EXISTS frame
                         (
-                          timestamp INTEGER,
-                          hchp      TEXT,
-                          va        REAL,
-                          iinst     REAL,
-                          watt      REAL
-                        );''')  # cree la table puissance si elle n existe pas
-    # $datas = array();
-    # $datas['timestamp'] = time();
-    # $datas['hchp']      = substr($trame['PTEC'],0,2); // indicateur heure pleine/creuse, on garde seulement les carateres HP (heure pleine) et HC (heure creuse)
-    # $datas['va']        = preg_replace('`^[0]*`','',$trame['PAPP']); // puissance en V.A, on supprime les 0 en debut de chaine
-    # $datas['iinst']     = preg_replace('`^[0]*`','',$trame['IINST']); // intensité instantanée en A, on supprime les 0 en debut de chaine
-    # $datas['watt']      = $datas['iinst']*220; // intensite en A X 220 V
+                          ADSC        bigint unsigned,
+                          VTIC        tinyint,
+                          NGTF        VARCHAR(16),
+                          LTARF       VARCHAR(16),
+                          EAST        VARCHAR(9),
+                          EASF01      VARCHAR(9),
+                          EASF02      VARCHAR(9),
+                          EASF03      VARCHAR(9),
+                          EASF04      VARCHAR(9),
+                          EASF05      VARCHAR(9),
+                          EASF06      VARCHAR(9),
+                          EASF07      VARCHAR(9),
+                          EASF08      VARCHAR(9),
+                          EASF09      VARCHAR(9),
+                          EASF10      VARCHAR(9),
+                          EASD01      VARCHAR(9),
+                          EASD02      VARCHAR(9),
+                          EASD03      VARCHAR(9),
+                          EASD04      VARCHAR(9),
+                          EAIT        VARCHAR(9),
+                          IRMS1       TINYINT,
+                          IRMS2       TINYINT,
+                          IRMS3       TINYINT,
+                          URMS1       TINYINT,
+                          URMS2       TINYINT,
+                          URMS3       TINYINT,
+                          PREF        TINYINT,
+                          PCOUP       TINYINT,
+                          SINSTS      TINYINT,
+                          SINSTS1     TINYINT,
+                          SINSTS2     TINYINT,
+                          SINSTS3     TINYINT,
+                          SMAXSN      TINYINT,
+                          SMAXSN1     TINYINT,
+                          SMAXSN2     TINYINT,
+                          SMAXSN3     TINYINT,
+                          SMAXSNMIN1  TINYINT,
+                          CCASN       TINYINT,
+                          UMOY1       TINYINT,
+                          UMOY2       TINYINT,
+                          UMOY3       TINYINT,
+                          STGE        VARCHAR(8),
+                          MSG1        VARCHAR(32),
+                          PRM         VARCHAR(14),
+                          RELAIS      TINYINT,
+                          NTARF       TINYINT,
+                          NJOURF      TINYINT,
+                          NJOURFPLUS1 TINYINT,
+                          PJOURFPLUS1 VARCHAR(98),
+                          TIME        VARCHAR
+                        )''')
 
-    # if($db->busyTimeout(5000)){ // stock les donnees
-    # $db->exec("INSERT INTO puissance (timestamp, hchp, va, iinst, watt) VALUES (".$datas['timestamp'].", '".$datas['hchp']."', ".$datas['va'].", ".$datas['iinst'].", ".$datas['watt'].");");
-    # }
+    add_frame = ("INSERT into frame "
+                 "(ADSC, VTIC, NGTF, LTARF, EAST,EASF01,EASF02,EASF03,EASF04,EASF05,EASF06,EASF07,EASF08,EASF09,EASF10,EASD01,EASD02," +
+                 "EASD03,EASD04,EAIT,IRMS1,IRMS2,IRMS3,URMS1,URMS2,URMS3,PREF, PCOUP , SINSTS ,SINSTS1 ,SINSTS2 ,SINSTS3 ,SMAXSN ,SMAXSN1 ,SMAXSN2 ,SMAXSN3 ," +
+                 "SMAXSN-1 ,CCASN ,UMOY1 ,UMOY2 ,UMOY3 ,STGE,MSG1,PRM,RELAIS ,NTARF ,NJOURF ,NJOURF+1 ,PJOURF+1,TIME)")
 
-    # return 1;
-    # }
+    # {'ADSC': '811875789290', 'VTIC': '02', 'NGTF': '      BASE      ', 'LTARF': '      BASE      ', 'EAST': '028682292', EASF01': '028682292', EASF02': '000000000', 'EASF03': '000000000', 'EASF04': '000000000', 'EASF05': '000000000', 'EASF06': '000000000', 'EASF07': '000000000', 'EASF08': '000000000', 'EASF09': '000000000', 'EASF10': '000000000', 'EASD01': '009983667', 'EASD02': '008860305', 'EASD03': '003030091', 'EASD04': '006808229', 'IRMS1': '003', 'URMS1': '235', 'PREF': '06', 'PCOUP': '06', 'SINSTS': '00650', 'STGE': '003A0001', 'MSG1': 'PAS DE          MESSAGE         ', 'PRM': '01160057870354', 'RELAIS': '000', 'NTARF': '01', 'NJOURF': '00', 'NJOURF+1': '00', 'PJOURF+1': '00008001 NONUTILE NONUTILE NONUTILE NONUTILE NONUTILE NONUTILE NONUTILE NONUTILE NONUTILE NONUTILE', 'TIME': '2025-05-30T22:50:27Z'}
 
-    # //
-    # //  enregistre la consommation en Wh
-    #                                  //
-    #                                  function handleConso () {
-    # global $sqlite;
-    # $db = new SQLite3($sqlite);
-    # $db->exec('CREATE TABLE IF NOT EXISTS conso (timestamp INTEGER, total_hc INTEGER, total_hp INTEGER, daily_hc REAL, daily_hp REAL);'); // cree la table conso si elle n'existe pas
-
-    # $trame     = getTeleinfo (); // recupere une trame teleinfo
-
-    # $today     = strtotime('today 00:00:00');
-    # $yesterday = strtotime("-1 day 00:00:00");
-
-    # // recupere la conso totale enregistree la veille pour pouvoir calculer la difference et obtenir la conso du jour
-    # if($db->busyTimeout(5000)){
-    # $previous = $db->query("SELECT * FROM conso WHERE timestamp = '".$yesterday."';")->fetchArray(SQLITE3_ASSOC);
-    # }
-    # if(empty($previous)){
-    # $previous = array();
-    # $previous['timestamp'] = $yesterday;
-    # $previous['total_hc']  = 0;
-    # $previous['total_hp']  = 0;
-    # $previous['daily_hc']  = 0;
-    # $previous['daily_hp']  = 0;
-    # }
-
-    # $datas = array();
-    # $datas['query']     = 'hchp';
-    # $datas['timestamp'] = $today;
-    # $datas['total_hc']  = preg_replace('`^[0]*`','',$trame['HCHC']); // conso total en Wh heure creuse, on supprime les 0 en debut de chaine
-    # $datas['total_hp']  = preg_replace('`^[0]*`','',$trame['HCHP']); // conso total en Wh heure pleine, on supprime les 0 en debut de chaine
-
-    # if($previous['total_hc'] == 0){
-    # $datas['daily_hc'] = 0;
-    # }
-    # else{
-    # $datas['daily_hc']  = ($datas['total_hc']-$previous['total_hc'])/1000; // conso du jour heure creuse = total aujourd'hui - total hier, on divise par 1000 pour avec un resultat en kWh
-    # }
-
-    # if($previous['total_hp'] == 0){
-    # $datas['daily_hp'] = 0;
-    # }
-    # else{
-    # $datas['daily_hp']  = ($datas['total_hp']-$previous['total_hp'])/1000; // conso du jour heure pleine = total aujourd'hui - total hier, on divise par 1000 pour avec un resultat en kWh
-    # }
-
-    # if($db->busyTimeout(5000)){ // stock les donnees
-    # $db->exec("INSERT INTO conso (timestamp, total_hc, total_hp, daily_hc, daily_hp) VALUES (".$datas['timestamp'].", ".$datas['total_hc'].", ".$datas['total_hp'].", ".$datas['daily_hc'].", ".$datas['daily_hp'].");");
-    # }
-    # }
-    # mysqlframe_queue.task_done()
   mycnx.commit()
   mycursor.close()
 
 
-def _send_data_to_mqtt(mymqttclient, myframe_queue=None):
+def format_payload_for_teleinfo_jeedom(frame: {} = dict()) -> str:
+  output_string = {}
+  payload = {k: v for k, v in frame.items()}
+  output_string['TIC'] = payload
+  logger.debug(f'output_string: {output_string}')
+  return json.dumps(output_string)
+
+
+def _send_data_to_mqtt(mymqttclient: mqtt_client = None, myframe_queue: Queue = None, mqtt_topic: str = "linky",
+                       mqtt_qos: int = 0, mqtt_retain: bool = False):
   while True:
-    # handlePuissance
     framemqtt = myframe_queue.get()
+
+    record = {}
     if 'TIME' in framemqtt.keys():
-      ftime = framemqtt.pop('TIME')
-      logger.debug(f'frame: {framemqtt}, time: {ftime}')
+      ftime = framemqtt['TIME']
+      # logger.debug(f'frame: {framemqtt}, time: {ftime}')
     else:
       logger.error(f'no Time in framemqtt')
-      logger.debug(f'frame: {framemqtt}')
+      # logger.debug(f'frame: {framemqtt}')
 
-    record = []
-    for measure, value in framemqtt.items():
-      item = {measure: value}
-      record.append(item)
-    #logger.debug(f'items: {record}')
+    if len(framemqtt) > 1:
+      if mqtt_teleinfo4jeedom:
+        payload = format_payload_for_teleinfo_jeedom(framemqtt)
+      else:
+        payload = json.dumps(framemqtt)
 
-    # client.message('puissance', record)
-    # myframe_queue.task_done()
+      logger.debug(f'qos: {mqtt_qos}, retain: {mqtt_retain}, 4jeedom: {mqtt_teleinfo4jeedom}, payload: {payload}')
+      mymqttclient.publish(mqtt_topic, payload=payload, qos=mqtt_qos, retain=mqtt_retain)
 
 
 def linky(log_level=logging.INFO):
@@ -334,11 +371,12 @@ def linky(log_level=logging.INFO):
                        timeout=1) as ser:
 
       # Boucle pour partir sur un début de trame
-      logger.info(f'linky_keys: {linky_keys}')
+      logger.info(f'linky_keys: {linky_keys}, ignore checksum for keys: {linky_ignore_checksum_for_keys}')
       logger.info('Attente d\'une première trame...')
       line = ser.readline()
       while START_FRAME not in line:  # Recherche du caractère de début de trame, c'est-à-dire STX 0x02
         line = ser.readline()
+        logger.debug(f'line waiting for start: {line}')
 
       # Initialisation d'une trame vide
       frame = dict()
@@ -360,41 +398,45 @@ def linky(log_level=logging.INFO):
 
         try:
           # Lecture de la première ligne de la première trame
-          line = ser.readline()
+          # line = ser.readline()
 
           # Décodage ASCII et nettoyage du retour à la ligne
           line_str = line.decode('ascii').rstrip()
           # logger.debug(f'Groupe d\'information brut : {line_str}')
 
           # Récupération de la somme de contrôle (qui est le dernier caractère de la ligne)
-          checksum = line_str[-1]
+          # checksum = line_str[-1]
 
-          # Identification du séparateur en vigueur (espace ou tabulation)
-          separator = line_str[-2]
+          # Identification du séparateur en vigueur (espace ou tabulation) #bug in PFJOUR+1
+          separator = line_str[-2] if line_str[-2] in ['\t', ' '] else "\t"
 
-          # Position du séparateur entre le champ étiquette et le champ données
-          pos = line_str.find(separator)
+          splitted_line = line_str.split(separator)
+          key = splitted_line[0]
+          idx = 1
+          if len(splitted_line) < 2:
+            logger.error(f'format incorrect de la trame, nb: {len(splitted_line)}<2, str: {line_str}')
+          else:
+            # Horodatage présent, on décale
+            if len(splitted_line) == 4:
+              idx = 2
+            val = splitted_line[idx]
+            checksum = splitted_line[idx + 1][0]
 
-          # Extraction de l'étiquette
-          key = line_str[0:pos]
+            # Est-ce une étiquette qui nous intéresse ?
+            if key in linky_keys or linky_keys[0] == "ALL":
+              logger.debug(f'captured decoded key : {key}={val}')
+              # Vérification de la somme de contrôle
+              if key in linky_ignore_checksum_for_keys or _checksum(key, val, separator, checksum,
+                                                                    linky_checksum_method):
+                # Ajout de la valeur
+                frame[key] = val
+              else:
+                logger.warning(f'Somme de contrôle erronée pour {key} = {val}')
 
-          # Extraction de la donnée
-          val = line_str[pos + 1:-2]
-
-          # Est-ce une étiquette qui nous intéresse ?
-          if key in linky_keys:
-            # logger.debug(f'captured decoded key : {key}={val}')
-            # Vérification de la somme de contrôle
-            if _checksum(key, val, separator, checksum, linky_checksum_method):
-              # Ajout de la valeur
-              frame[key] = val
-            else:
-              logger.warning(f'Somme de contrôle erronée pour {key}={val}')
-
-          # Si caractère de fin de trame dans la ligne, on écrit les données dans InfluxDB
+          # Si caractère de fin de trame dans la ligne, on envoie les données vers le(s) endpoint demandé(s)
           if STOP_FRAME in line:
             num_keys = len(frame)
-            logger.info(f'Trame reçue ({num_keys} étiquettes traités)')
+            logger.debug(f'Trame reçue ({num_keys} étiquettes traités)')
 
             # Horodatage de la trame reçue
             frame['TIME'] = datetime.now().strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -403,23 +445,25 @@ def linky(log_level=logging.INFO):
             # Ajout à la queue d'envoi vers InfluxDB
             if influxdb_send_data:
               frame_influxdb_queue.put(frame)
-              if frame_influxdb_queue.qsize() >1:
-                logger.debug(f'queue: {frame_influxdb_queue.qsize()}')
+              if frame_influxdb_queue.qsize() > 1:
+                logger.debug(f'influxdb queue: {frame_influxdb_queue.qsize()}')
 
             # Ajout à la queue d'envoi vers mysql
             if mysql_send_data:
               frame_mysql_queue.put(frame)
               if frame_mysql_queue.qsize() > 1:
-                logger.warning(f'frame_mysql_queue: {frame_mysql_queue.qsize()}')
+                logger.warning(f'mysql queue: {frame_mysql_queue.qsize()}')
 
             # Ajout à la queue d'envoi vers mqtt
             if mqtt_send_data:
               frame_mqtt_queue.put(frame)
               if frame_mqtt_queue.qsize() > 1:
-                logger.warning(f'frame_mqtt_queue: {frame_mqtt_queue.qsize()}')
+                logger.warning(f'mqtt queue: {frame_mqtt_queue.qsize()}')
 
             # On réinitialise une nouvelle trame
             frame = dict()
+            time.sleep(linky_sleep_interval)
+          line = ser.readline()
 
         except Exception as e:
           logger.error(f'Etiquette : {key}  Donnée : {val}')
@@ -510,11 +554,19 @@ if __name__ == '__main__':
     linky_location = cfg['linky']['location']
     linky_legacy_mode = cfg['linky']['legacy_mode']
     linky_checksum_method = cfg['linky'].get('checksum_method', DEFAULT_CHECKSUM_METHOD)
+    linky_ignore_checksum_for_keys = cfg['linky'].get('ignore_checksum_for_keys', '[]')
     linky_keys = cfg['linky'].get('keys', DEFAULT_KEYS)
+    linky_sleep_interval = cfg['linky'].get('sleep_interval', DEFAULT_INTERVAL)
+
     raspberry_stty_port = cfg['raspberry']['stty_port']
+
     influxdb_send_data = cfg['influxdb']['send_data']
+
     mysql_send_data = cfg['mysql']['send_data']
+
     mqtt_send_data = cfg['mqtt']['send_data']
+    mqtt_teleinfo4jeedom = cfg['mqtt']['teleinfo4jeedom']
+
     if influxdb_send_data:
       influxdb_url = cfg['influxdb']['url']
       influxdb_bucket = cfg['influxdb']['bucket']
@@ -531,7 +583,9 @@ if __name__ == '__main__':
       mqtt_port = cfg['mqtt']['port']
       mqtt_username = cfg['mqtt']['username']
       mqtt_password = cfg['mqtt']['password']
-      mqtt_database = cfg['mqtt']['database']
+      mqtt_topic = cfg['mqtt']['topic']
+      mqtt_retain = cfg['mqtt']['retain']
+      mqtt_qos = cfg['mqtt']['qos']
 
 
   except KeyError as exc:
@@ -550,20 +604,30 @@ if __name__ == '__main__':
   if influxdb_send_data:
     # Création d'une queue FIFO pour stocker les données
     frame_influxdb_queue = Queue()
-    write_client, send_influx_thread = create_influxdb_client_and_thread(influxdb_url, influxdb_token, influxdb_org,
-                                                                         linky_location, frame_influxdb_queue)
+    write_client, send_influx_thread = create_influxdb_client_and_thread(influxdb_url=influxdb_url,
+                                                                         influxdb_token=influxdb_bucket,
+                                                                         influxdb_org=influxdb_org,
+                                                                         linky_location=linky_location,
+                                                                         myframe_queue=frame_influxdb_queue)
 
   if mysql_send_data:
     # Création d'une queue FIFO pour stocker les données
     frame_mysql_queue = Queue()
-    mysql_client, send_mysql_thread = create_mysql_client_and_thread(mysql_host, mysql_port, mysql_username,
-                                                                     mysql_password, mysql_database, frame_mysql_queue)
+    mysql_client, send_mysql_thread = create_mysql_client_and_thread(mysql_host=mysql_host, mysql_port=mysql_port,
+                                                                     mysql_username=mysql_username,
+                                                                     mysql_password=mysql_password,
+                                                                     mysql_database=mysql_database,
+                                                                     frame_mysql_queue=frame_mysql_queue)
 
   if mqtt_send_data:
     # Création d'une queue FIFO pour stocker les données
     frame_mqtt_queue = Queue()
-    mqtt_client, send_mqtt_thread = create_mqtt_client_and_thread(mqtt_host, mqtt_port, mqtt_username, mqtt_password,
-                                                                  mqtt_database, frame_mqtt_queue)
+    mqtt_client, send_mqtt_thread = create_mqtt_client_and_thread(mqtt_host=mqtt_host, mqtt_port=mqtt_port,
+                                                                  mqtt_username=mqtt_username,
+                                                                  mqtt_password=mqtt_password,
+                                                                  mqtt_topic=mqtt_topic, mqtt_qos=mqtt_qos,
+                                                                  mqtt_retain=mqtt_retain,
+                                                                  mqtt_queue=frame_mqtt_queue)
     mqtt_client.loop_start()
 
   # Lance la boucle infinie de lecture de la téléinfo

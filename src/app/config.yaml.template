@@ -1,16 +1,20 @@
-debug: ${DEBUG}                   # true permet de logger plus d'information en cas de problème
+debug: ${DEBUG}                     # true permet de logger plus d'information en cas de problème
 
 linky:
-  location: '${CITY}'
+  location: ${CITY}
   legacy_mode: ${LEGACY}            # Mode TIC historique = true, sinon false
-  checksum_method: ${CHECKSUM}           # Mode de calcul du checksum : 1 ou 2, se référer à la notice ENEDIS
-  keys: ${KEYS}  # Liste des étiquettes à récupérer via la téléinfo
+  checksum_method: ${CHECKSUM}      # Mode de calcul du checksum : 1 ou 2, se référer à la notice ENEDIS
+  keys: ${KEYS}                     # Liste des étiquettes à récupérer via la téléinfo
+  ignore_checksum_for_keys: ${IGNORE_KEYS_CHEKSUM}
+                                    # Liste des étiquettes a passer quel que que soit le controle du checksoum
+  sleep_interval: ${SLEEP_INTERVAL} # Collecte des données toutes les X secondes.
+
 
 raspberry:
-  stty_port: '/dev/ttyserial0'    # Port série du Raspberry Pi
+  stty_port: '/dev/ttyserial0'      # Port série du Raspberry Pi
 
 influxdb:
-  send_data: ${INFLUX_SEND}             # false permet de tester le script en local sans envoyer de données
+  send_data: ${INFLUX_SEND}         # false permet de tester le script en local sans envoyer de données
   url: ${INFLUX_URL}
   bucket: ${INFLUX_BUCKET}
   token: ${INFLUX_TOKEN}
@@ -30,4 +34,7 @@ mqtt:
   port: ${MQTT_PORT}
   username: ${MQTT_USERNAME}
   password: ${MQTT_PASSWORD}
-  database: ${MQTT_DB}
+  topic: ${MQTT_TOPIC}
+  retain: ${MQTT_RETAIN}
+  qos: ${MQTT_QOS}
+  teleinfo4jeedom: ${MQTT_4JEEDOM}

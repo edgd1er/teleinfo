@@ -7,9 +7,15 @@ ENV DEBUG=false \
     CHECKSUM=1 \
     KEYS="ISOUSC BASE IINST" \
     PORT='ttyS0' \
+    SLEEP_INTERVAL=60 \
     INFLUX_SEND=false \
     MYSQL_SEND=false \
-    MQTT_SEND=false
+    MQTT_SEND=false \
+    MQTT_TOPIC="linky" \
+    MQTT_QOS=0 \
+    MQTT_RETAIN=False \
+    MQTT_4JEEDOM=False \
+    IGNORE_KEYS_CHEKSUM="[]"
 
     # Liste des étiquettes transmises par la Téléinfo Client (TIC)
 

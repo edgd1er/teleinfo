@@ -5,9 +5,7 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-      args:
-        DEBUG: true
-    privileged: true
+      args: []
     environment:
       TZ: "Europe/Paris"
       DEBUG: True

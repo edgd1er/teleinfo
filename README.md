@@ -61,3 +61,7 @@ PAPP     : Puissance apparente
 HHPHC    : Horaire Heures Pleines Heures Creuses
 MOTDETAT : Mot d'état du compteur
 ```
+
+## Influxdb v1
+
+docker compose exec influxdb bash -c influx < "create database linky; use linky; CREATE USER linky WITH PASSWORD '123456' WITH ALL PRIVILEGES;"
