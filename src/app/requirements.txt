@@ -12,7 +12,7 @@ pytz==2025.2
 PyYAML==6.0.2
 requests==2.32.3
 serial==0.0.97
-setuptools==75.6.0
+setuptools==78.1.1
 six==1.17.0
 smmap==5.0.2
 urllib3==2.4.0
