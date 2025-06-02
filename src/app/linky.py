@@ -342,10 +342,13 @@ def _send_data_to_mqtt(mymqttclient: mqtt_client = None, myframe_queue: Queue = 
       logger.error(f'no Time in framemqtt')
       # logger.debug(f'frame: {framemqtt}')
 
+    # la trame n'est pas vide
     if len(framemqtt) > 1:
+      # mise au format pour jeedom
       if mqtt_teleinfo4jeedom:
         payload = format_payload_for_teleinfo_jeedom(framemqtt)
       else:
+        # envoi brut de la trame
         payload = json.dumps(framemqtt)
 
       logger.debug(f'qos: {mqtt_qos}, retain: {mqtt_retain}, 4jeedom: {mqtt_teleinfo4jeedom}, payload: {payload}')
@@ -386,18 +389,18 @@ def process_teleinfo(bytes: bytes = None):
       logger.error(f'format incorrect de la trame, nb: {len(splitted_dataset)}<2, str: {dataset.decode("ascii")}')
       return None
     # Horodatage présent, on décale
-    if len(splitted_dataset) >3:
+    if len(splitted_dataset) > 3:
       idx = 2
     val = splitted_dataset[idx]
-    #pas de donnée pour date mais un horodatage
+    # pas de donnée pour date mais un horodatage
     if key == 'DATE':
-      val = splitted_dataset[idx-1]
+      val = splitted_dataset[idx - 1]
 
     checksum = splitted_dataset[idx + 1][0]
 
     # Est-ce une étiquette qui nous intéresse ?
     if key in linky_keys or linky_keys[0] == "ALL":
-      #logger.debug(f'captured decoded key #{i}: {key}={val}')
+      # logger.debug(f'captured decoded key #{i}: {key}={val}')
 
       # Vérification de la somme de contrôle
       if key in linky_ignore_checksum_for_keys or _checksum(str_dataset[0:-1], checksum):
@@ -408,9 +411,8 @@ def process_teleinfo(bytes: bytes = None):
 
   num_keys = len(frame)
   logger.info(f'Trame reçue ({num_keys} étiquettes traités)')
-  #for i,(k,v) in enumerate(frame.items()):
+  # for i,(k,v) in enumerate(frame.items()):
   #  logger.debug(f'frame[{i}]: {k}={v}')
-
 
   # Horodatage de la trame reçue
   frame['TIME'] = datetime.now().strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -440,37 +442,45 @@ def linky(log_level=logging.INFO):
   # Ouverture du port série
   try:
     baudrate = 1200 if linky_legacy_mode else 9600
-    logger.info(
-      f'Ouverture du port série {raspberry_stty_port} à {baudrate} Bd')
+    logger.info(f'Ouverture du port série {raspberry_stty_port} à {baudrate} Bd')
     ser = serial.Serial(port=raspberry_stty_port,
                         baudrate=baudrate,
                         parity=serial.PARITY_EVEN,
                         stopbits=serial.STOPBITS_ONE,
                         bytesize=serial.SEVENBITS,
-                        timeout=1)
+                        timeout=None)
 
     # Boucle pour partir sur un début de trame
     logger.info(f'linky_keys: {linky_keys}, ignore checksum for keys: {linky_ignore_checksum_for_keys}')
     logger.info('Attente d\'une première trame...')
     while True:
       error = 0
-      not_wanted_line = ser.read_until(START_FRAME)
-      logger.debug(f'nouvelle trame trouvée, ignore: {not_wanted_line}')
-      wanted_bytes_line = ser.read_until(STOP_FRAME)  # Recherche du caractère de début de trame, c'est-à-dire STX 0x02
-      # nouveau dataset demarre avec un LF (10)
-      if wanted_bytes_line[0] != 0x0a:
-        logger.error(f'wanted_bytes_line ne demarre pas avec un LF: {wanted_bytes_line[0]}')
+      # not_wanted_line = ser.read_until(START_FRAME)
+      # logger.debug(f'nouvelle trame trouvée, ignore: {not_wanted_line}')
+      current_bytes = ser.read_until(STOP_FRAME)  # lecture jusqu a la fin de la trame
+      idx_start = current_bytes.find(START_FRAME)  # Recherche du caractère de début de trame, c'est-à-dire STX 0x02
+      idx_stop = current_bytes.find(STOP_FRAME)  # Recherche du caractère de fin de trame, c'est-à-dire STX 0x03
+      # logger.debug(f'current_bytes: {idx_start},{idx_start},{current_bytes}')
+      if idx_start == -1 or idx_stop == -1 or idx_start > idx_stop:
+        logger.info(f'incomplete frame: start:{idx_start}, end: {idx_stop} , content: {current_bytes}')
         error = 1
-      # dataset termine avec CR(13) sauf si bug
-      if wanted_bytes_line[-1] not in [0x0d, 0x03]:
-        logger.error(f'wanted_bytes_line ne finit pas avec un CR: {wanted_bytes_line[-1]}')
+      # exract payload
+      wanted_bytes_line = current_bytes[idx_start + 1:idx_stop]
+      # nouveau dataset demarre avec un Line Feed (LF) character (0x0A, \n)
+      if wanted_bytes_line[0] != 0x0a:
+        logger.error(
+          f'début incorrect de trame, ne demarre pas avec un LF: {wanted_bytes_line[0]}, {wanted_bytes_line}')
+        error = 1
+      elif wanted_bytes_line[-1] not in [0x0d, 0x03]:
+        # dataset termine avec CR(10) sauf si bug: Carriage Return (CR) character (0x0D, \r)
+        logger.error(f'fin incorrecte de trame, ne finit pas avec un CR: {wanted_bytes_line[-1]}, {wanted_bytes_line}')
         error = 1
       if error == 0:
-        #remove terminal \x03
+        # remove terminal \x03
         process_teleinfo(wanted_bytes_line[0:-1])
-      else:
-        logger.error(f'Cannot process: {wanted_bytes_line}')
-      time.sleep(linky_sleep_interval)
+        time.sleep(linky_sleep_interval)
+  #      else:
+  #        logger.error(f'Cannot process: {wanted_bytes_line}')
 
   except serial.SerialException as exc:
     if exc.errno == 13:

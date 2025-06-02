@@ -44,15 +44,16 @@ ENV DEBUG=false \
     # MOTDETAT : Mot d'état du compteur
 
 RUN apk add --no-cache  tzdata supervisor mariadb-common mariadb-client mariadb-connector-c \
-    py3-mysqlclient python3 py3-pip gettext py3-pyserial py3-yaml py3-influxdb py3-paho-mqtt
-RUN if [ false != ${DEBUG:-false} ]; then apk add bash vim; fi ; cp /etc/supervisord.conf /etc/supervisord.conf.package
-RUN sed -i "s#;nodaemon=false#nodaemon=true#" /etc/supervisord.conf \
-    && sed -i "s#;loglevel=info#loglevel=info#" /etc/supervisord.conf
+    py3-mysqlclient python3 py3-pip gettext py3-pyserial py3-yaml py3-influxdb py3-paho-mqtt \
+    && cp /etc/supervisord.conf /etc/supervisord.conf.package \
+    && sed -i "s#;nodaemon=false#nodaemon=true#" /etc/supervisord.conf \
+    && sed -i "s#;loglevel=info#loglevel=info#" /etc/supervisord.conf \
+    && pip3 install --break-system-packages influxdb-client mysql-connector-python
 
-RUN pip3 install --break-system-packages influxdb-client mysql-connector-python
-ADD /src/app/ /app/
-ADD /src/etc/ /etc/
-RUN chmod +x /app/*.sh /app/*.py
+RUN if [ false != ${DEBUG:-false} ]; then apk add bash vim; fi ;
+
+ADD --chmod=750 /src/app/ /app/
+ADD --chmod=640 /src/etc/ /etc/
 
 CMD ["/usr/bin/supervisord", "-c", "/etc/supervisord.conf"]
 #ENTRYPOINT ["/app/entrypoint.sh"]
