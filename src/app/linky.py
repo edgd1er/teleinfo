@@ -13,6 +13,7 @@ import json
 # * Tester plusieurs scénarios d'erreurs InfluxDB (iptables sur serveur, arrêt du serveur)
 
 import logging
+import re
 from multiprocessing import Process, Queue
 import signal
 import termios
@@ -28,6 +29,7 @@ from influxdb_client import InfluxDBClient, Point
 from influxdb_client.client.exceptions import InfluxDBError
 from influxdb_client.client.write_api import SYNCHRONOUS, PointSettings
 from influxdb_client.rest import ApiException
+from mysql.connector.pooling import PooledMySQLConnection
 from urllib3 import Retry
 from urllib3.exceptions import HTTPError
 import mysql.connector
@@ -41,6 +43,60 @@ DEFAULT_INTERVAL = 60
 
 START_FRAME = b'\x02'  # STX, Start of Text
 STOP_FRAME = b'\x03'  # ETX, End of Text
+
+if 'TZ' in os.environ:
+  time.tzset()
+
+MYSQL_DB_DATATYPE = {"ADSC": ["bigint unsigned", 0], "VTIC": ["tinyint  UNSIGNED", 2], "DATE": ["VARCHAR(13)", ""],
+                     "NGTF": ["VARCHAR(16)", ""],
+                     "LTARF": ["VARCHAR(16)", ""],
+                     "EAST": ["VARCHAR(9)", ""],
+                     "EASF01": ["VARCHAR(9)", ""],
+                     "EASF02": ["VARCHAR(9)", ""],
+                     "EASF03": ["VARCHAR(9)", ""],
+                     "EASF04": ["VARCHAR(9)", ""],
+                     "EASF05": ["VARCHAR(9)", ""],
+                     "EASF06": ["VARCHAR(9)", ""],
+                     "EASF07": ["VARCHAR(9)", ""],
+                     "EASF08": ["VARCHAR(9)", ""],
+                     "EASF09": ["VARCHAR(9)", ""],
+                     "EASF10": ["VARCHAR(9)", ""],
+                     "EASD01": ["VARCHAR(9)", ""],
+                     "EASD02": ["VARCHAR(9)", ""],
+                     "EASD03": ["VARCHAR(9)", ""],
+                     "EASD04": ["VARCHAR(9)", ""],
+                     "EAIT": ["VARCHAR(9)", ""],
+                     "IRMS1": ["TINYINT UNSIGNED", 0],
+                     "IRMS2": ["TINYINT UNSIGNED", 0],
+                     "IRMS3": ["TINYINT UNSIGNED", 0],
+                     "URMS1": ["TINYINT UNSIGNED", 0],
+                     "URMS2": ["TINYINT UNSIGNED", 0],
+                     "URMS3": ["TINYINT UNSIGNED", 0],
+                     "PREF": ["TINYINT UNSIGNED", 0],
+                     "PCOUP": ["TINYINT UNSIGNED", 0],
+                     "SINSTS": ["SMALLINT UNSIGNED", 0],
+                     "SINSTS1": ["SMALLINT UNSIGNED", 0],
+                     "SINSTS2": ["SMALLINT UNSIGNED", 0],
+                     "SINSTS3": ["SMALLINT UNSIGNED", 0],
+                     "SMAXSN": ["SMALLINT UNSIGNED", 0],
+                     "SMAXSN1": ["SMALLINT UNSIGNED", 0],
+                     "SMAXSN2": ["SMALLINT UNSIGNED", 0],
+                     "SMAXSN3": ["SMALLINT UNSIGNED", 0],
+                     "SMAXSNMIN1": ["SMALLINT UNSIGNED", 0],
+                     "CCASN": ["SMALLINT UNSIGNED", 0],
+                     "CCASNMIN1": ["SMALLINT UNSIGNED", 0],
+                     "UMOY1": ["TINYINT UNSIGNED", 0],
+                     "UMOY2": ["TINYINT UNSIGNED", 0],
+                     "UMOY3": ["TINYINT UNSIGNED", 0],
+                     "STGE": ["VARCHAR(8)", ""],
+                     "MSG1": ["VARCHAR(32)", ""],
+                     "PRM": ["VARCHAR(14)", ""],
+                     "RELAIS": ["TINYINT UNSIGNED", 0],
+                     "NTARF": ["TINYINT UNSIGNED", 0],
+                     "NJOURF": ["TINYINT UNSIGNED", 0],
+                     "NJOURFPLUS1": ["TINYINT UNSIGNED", 0],
+                     "PJOURFPLUS1": ["VARCHAR(98)", ""],
+                     "TIME": ["TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP, PRIMARY KEY (`TIME`)", "NULL"]}
 
 
 #################################################################################################
@@ -78,14 +134,24 @@ def create_influxdb_client_and_thread(influxdb_url: str = "", influxdb_token: st
 
 
 #################################################################################################
-def create_mysql_client_and_thread(mysql_host, mysql_port, mysql_username, mysql_password, mysql_database,
-                                   myframe_queue):
+def create_mysql_client_and_thread(mysql_host: str = "", mysql_port: int = 3306, mysql_username: str = "",
+                                   mysql_password: str = "", mysql_database: str = "",
+                                   myframe_queue: Queue = None):
   # Connexion à mysql
   try:
     # Obtention du client d'API en écriture
     logger.info(f'Connexion à {mysql_username}@{mysql_host}:{mysql_port}')
     mycnx = mysql.connector.connect(host=mysql_host, user=mysql_username, password=mysql_password,
                                     database=mysql_database)
+    f = ""
+    for k in MYSQL_DB_DATATYPE.keys():
+      f += f'`{k}` {MYSQL_DB_DATATYPE[k][0]},'
+
+    logger.debug(f'table datatype: {f[:-1]}')
+    logger.info(f'Creation de la table frame dans la bdd {mysql_database}')
+    mycursor = mycnx.cursor()
+    mycursor.execute(f'CREATE TABLE IF NOT EXISTS frame ( {f[:-1]} );')
+    mycursor.close()
 
   except Exception as exc:
     logger.error(f'Erreur de connexion à mysql: {exc}')
@@ -127,7 +193,7 @@ def on_disconnect(client, userdata, rc):
 def create_mqtt_client_and_thread(mqtt_host: str = None, mqtt_port: int = 1883, mqtt_username: str = "",
                                   mqtt_password: str = "",
                                   mqtt_topic: str = "mytopic", mqtt_qos: int = 0, mqtt_retain: bool = False,
-                                  mqtt_queue: Queue = None):
+                                  myframe_queue: Queue = None):
   client = mqtt_client.Client(f'linky-teleinfo-{random.randint(0, 1000)}')
   # For paho-mqtt 2.0.0, you need to set callback_api_version.
   # client = mqtt_client.Client(client_id=client_id, callback_api_version=mqtt_client.CallbackAPIVersion.VERSION2)
@@ -140,7 +206,7 @@ def create_mqtt_client_and_thread(mqtt_host: str = None, mqtt_port: int = 1883, 
   # Démarrage du thread d'envoi vers mysql
   logger.info(f'Démarrage du thread d\'envoi vers mqtt #{mqtt_topic}')
   send_mqtt_thread = Process(target=_send_data_to_mqtt,
-                             args=(client, mqtt_queue, mqtt_topic, mqtt_qos, mqtt_retain), daemon=True)
+                             args=(client, myframe_queue, mqtt_topic, mqtt_qos, mqtt_retain), daemon=True)
   send_mqtt_thread.start()
 
   return client, send_mqtt_thread
@@ -235,93 +301,50 @@ def _send_frames_to_influx(influxdb_frame_queue: Queue = None, influxdb_bucket=N
     # influxdb_frame_queue.task_done()
 
 
-def _send_data_to_mysql(mycnx=None, mysqlframe_queue=None):
+def _send_data_to_mysql(mycnx: PooledMySQLConnection = None, mysqlframe_queue=None):
   """
   /  enregistre la puissance instantanée en V.A et en W
   :return:
   """
+  mycursor = mycnx.cursor()
   while True:
-    # handlePuissance
     framemysql = mysqlframe_queue.get()
-    if 'TIME' in framemysql.keys():
-      ftime = framemysql.pop('TIME')
-      logger.debug(f'frame: {framemysql}, time: {ftime}')
-    else:
-      logger.error(f'no Time in framemysql')
-      logger.debug(f'frame: {framemysql}')
+    tcolumns = ""
+    tvalues = []
+    tformat = ""
+    mysql_value = ""
+    if len(framemysql) > 0:
+      for label, value in framemysql.items():
+        tlabel = label.replace('+', 'PLUS').replace('-', 'MIN').strip()
+        tcolumns += f'{tlabel},'
+        tformat += "%s,"
+        gui = ""
+        if label.lower() == 'DATE':
+          mysql_value = linky_decode_date(value)
+        else:
+          mysql_value = re.sub(r"\s+", " ", value)
+        if MYSQL_DB_DATATYPE[tlabel][0].lower().startswith("varchar") or MYSQL_DB_DATATYPE[tlabel][
+          0].lower() == "datetime":
+          gui = ''
+        tvalues.append(f'{gui}{mysql_value.strip()}{gui}')
+      logger.debug(f'tcolumns: {tcolumns[:-1]}, tvalues: {tvalues}')
+      try:
+        insert_stmt = (
+          f'INSERT INTO frame ({tcolumns[:-1]}) '
+          f'VALUES ({tformat[:-1]})'
+        )
+        mycursor.execute(insert_stmt, tvalues)
+        mycnx.commit()
+      except mysql.connector.errors.ProgrammingError as exc:
+        logger.error(f'Erreur MySQL insert: {tcolumns} ## {tvalues}')
+        logger.error(f'Erreur MySQL insert: {exc}', exc_info=True)
+      except Exception as e:
+        logger.error(f'Erreur MySQL: {e}', exc_info=True)
 
-    record = []
-    for measure, value in framemysql.items():
-      item = {measure: value}
-      record.append(item)
-    # logger.debug(f'items: {record}')
-    mycursor = mycnx.cursor()
-    mycursor.execute('''CREATE TABLE IF NOT EXISTS frame
-                        (
-                          ADSC        bigint unsigned,
-                          VTIC        tinyint,
-                          NGTF        VARCHAR(16),
-                          LTARF       VARCHAR(16),
-                          EAST        VARCHAR(9),
-                          EASF01      VARCHAR(9),
-                          EASF02      VARCHAR(9),
-                          EASF03      VARCHAR(9),
-                          EASF04      VARCHAR(9),
-                          EASF05      VARCHAR(9),
-                          EASF06      VARCHAR(9),
-                          EASF07      VARCHAR(9),
-                          EASF08      VARCHAR(9),
-                          EASF09      VARCHAR(9),
-                          EASF10      VARCHAR(9),
-                          EASD01      VARCHAR(9),
-                          EASD02      VARCHAR(9),
-                          EASD03      VARCHAR(9),
-                          EASD04      VARCHAR(9),
-                          EAIT        VARCHAR(9),
-                          IRMS1       TINYINT,
-                          IRMS2       TINYINT,
-                          IRMS3       TINYINT,
-                          URMS1       TINYINT,
-                          URMS2       TINYINT,
-                          URMS3       TINYINT,
-                          PREF        TINYINT,
-                          PCOUP       TINYINT,
-                          SINSTS      TINYINT,
-                          SINSTS1     TINYINT,
-                          SINSTS2     TINYINT,
-                          SINSTS3     TINYINT,
-                          SMAXSN      TINYINT,
-                          SMAXSN1     TINYINT,
-                          SMAXSN2     TINYINT,
-                          SMAXSN3     TINYINT,
-                          SMAXSNMIN1  TINYINT,
-                          CCASN       TINYINT,
-                          UMOY1       TINYINT,
-                          UMOY2       TINYINT,
-                          UMOY3       TINYINT,
-                          STGE        VARCHAR(8),
-                          MSG1        VARCHAR(32),
-                          PRM         VARCHAR(14),
-                          RELAIS      TINYINT,
-                          NTARF       TINYINT,
-                          NJOURF      TINYINT,
-                          NJOURFPLUS1 TINYINT,
-                          PJOURFPLUS1 VARCHAR(98),
-                          TIME        VARCHAR
-                        )''')
-
-    add_frame = ("INSERT into frame "
-                 "(ADSC, VTIC, NGTF, LTARF, EAST,EASF01,EASF02,EASF03,EASF04,EASF05,EASF06,EASF07,EASF08,EASF09,EASF10,EASD01,EASD02," +
-                 "EASD03,EASD04,EAIT,IRMS1,IRMS2,IRMS3,URMS1,URMS2,URMS3,PREF, PCOUP , SINSTS ,SINSTS1 ,SINSTS2 ,SINSTS3 ,SMAXSN ,SMAXSN1 ,SMAXSN2 ,SMAXSN3 ," +
-                 "SMAXSN-1 ,CCASN ,UMOY1 ,UMOY2 ,UMOY3 ,STGE,MSG1,PRM,RELAIS ,NTARF ,NJOURF ,NJOURF+1 ,PJOURF+1,TIME)")
-
-    # {'ADSC': '811875789290', 'VTIC': '02', 'NGTF': '      BASE      ', 'LTARF': '      BASE      ', 'EAST': '028682292', EASF01': '028682292', EASF02': '000000000', 'EASF03': '000000000', 'EASF04': '000000000', 'EASF05': '000000000', 'EASF06': '000000000', 'EASF07': '000000000', 'EASF08': '000000000', 'EASF09': '000000000', 'EASF10': '000000000', 'EASD01': '009983667', 'EASD02': '008860305', 'EASD03': '003030091', 'EASD04': '006808229', 'IRMS1': '003', 'URMS1': '235', 'PREF': '06', 'PCOUP': '06', 'SINSTS': '00650', 'STGE': '003A0001', 'MSG1': 'PAS DE          MESSAGE         ', 'PRM': '01160057870354', 'RELAIS': '000', 'NTARF': '01', 'NJOURF': '00', 'NJOURF+1': '00', 'PJOURF+1': '00008001 NONUTILE NONUTILE NONUTILE NONUTILE NONUTILE NONUTILE NONUTILE NONUTILE NONUTILE NONUTILE', 'TIME': '2025-05-30T22:50:27Z'}
-
-  mycnx.commit()
   mycursor.close()
 
 
-def format_payload_for_teleinfo_jeedom(frame: {} = dict()) -> str:
+def format_payload_for_teleinfo_jeedom(frame: {} = {}) -> str:
   output_string = {}
   payload = {k: v for k, v in frame.items()}
   output_string['TIC'] = payload
@@ -356,6 +379,161 @@ def _send_data_to_mqtt(mymqttclient: mqtt_client = None, myframe_queue: Queue = 
 
 
 #####################################################################################################################
+def linky_decode_date(value: str = ""):
+  # E250603110050
+  if len(value) < len("E250603110050"):
+    logger.error(f'donnée incorrecte: {value} pas decodable SYYMMDDHHSS')
+    return datetime.now()
+  try:
+    saison = value[0]
+    annee = 2000 + int(value[1:3])
+    mois = int(value[3:5])
+    jour = int(value[5:7])
+    heure = int(value[7:9])
+    minute = int(value[9:11])
+    sec = int(value[11:])
+    dt = datetime(year=annee, month=mois, day=jour, hour=heure, minute=minute, second=sec)
+  except ValueError as e:
+    logger.debug(f'value:{value} => {e}')
+    dt = datetime.now()
+
+  logger.debug(f'val: {value}, s: {saison}, a:{annee}, m:{mois}, j:{jour}, h:{heure}, m:{minute}, s:{sec}, dt: {dt}')
+
+  if saison in ['e', 'h', ' ']:
+    logger.error(f'Compteur en mode dégradé pour l\'heure: {saison}')
+  return datetime(year=annee, month=mois, day=jour, hour=heure, minute=minute, second=sec)
+
+
+def linky_decode_status(hex_str: str = ""):
+  if len(hex_str) != 8:
+    raise ValueError("Le registre doit contenir exactement 8 caractères hexadécimaux.")
+
+  # Conversion en entier
+  registre = int(hex_str, 16)
+  resultats = {}
+
+  # Bit 0 : contact sec
+  contact_sec = (registre >> 0) & 0b1
+  resultats['Contact sec'] = 'fermé' if contact_sec == 0 else 'ouvert'
+
+  # Bits 1 à 3 : organe de coupure
+  organe_coupure = (registre >> 1) & 0b111
+  raisons_coupure = {
+    0: 'fermé',
+    1: 'ouvert sur surpuissance',
+    2: 'ouvert sur surtension',
+    3: 'ouvert sur délestage',
+    4: 'ouvert sur ordre CPL ou Euridis',
+    5: 'ouvert sur surchauffe (courant > courant max)',
+    6: 'ouvert sur surchauffe (courant < courant max)'
+  }
+  resultats['Organe de coupure'] = raisons_coupure.get(organe_coupure, 'inconnu')
+
+  # Bit 4 : état du cache-bornes distributeur
+  cache_bornes = (registre >> 4) & 0b1
+  resultats["État du cache-bornes distributeur"] = 'fermé' if cache_bornes == 0 else 'ouvert'
+
+  # Bit 5 : surtension sur une des phases
+  surtension = (registre >> 5) & 0b1
+  resultats['Surtension'] = 'pas de surtension' if surtension == 0 else 'surtension détectée'
+
+  # Bit 6 : dépassement de puissance de référence
+  depassement = (registre >> 6) & 0b1
+  resultats['Dépassement puissance'] = 'pas de dépassement' if depassement == 0 else 'dépassement en cours'
+
+  # Bit 7 : fonctionnement producteur / consommateur
+  role = (registre >> 7) & 0b1
+  resultats['Fonctionnement'] = 'consommateur' if role == 0 else 'producteur'
+
+  # Bit 8 : sens de l’énergie active
+  sens_energie = (registre >> 8) & 0b1
+  resultats["Sens de l'énergie active"] = 'énergie active positive' if sens_energie == 0 else 'énergie active négative'
+
+  # Bits 9 à 10 : tarif en cours (sur contrat de fourniture)
+  tarif_fourniture = (registre >> 9) & 0b11
+  index_mapping = {
+    0: "Index 1",
+    1: "Index 2",
+    2: "Index 3",
+    3: "Index 4",
+    4: "Index 5",
+    5: "Index 6",
+  }
+  resultats['Tarif en cours (fourniture)'] = index_mapping.get(tarif_fourniture, 'inconnu')
+
+  # Bits 11 à 13 : ignorés (non utilisés)
+
+  # Bits 14-15 : tarif en cours (contrat distributeur)
+  tarif_distributeur = (registre >> 14) & 0b11
+  resultats['Tarif en cours (distributeur)'] = index_mapping.get(tarif_distributeur, 'inconnu')
+
+  # Bit 16 : horloge dégradée
+  horloge = (registre >> 16) & 0b1
+  resultats["Horloge"] = "correcte" if horloge == 0 else "mode dégradée"
+
+  # Bit 17 : sortie télé-information
+  teleinfo = (registre >> 17) & 0b1
+  resultats["Sortie télé-information"] = "mode historique" if teleinfo == 0 else "mode standard"
+
+  # Bits 18 : non utilisé
+
+  # Bits 19-20 : sortie communication Euridis
+  euridis = (registre >> 19) & 0b11
+  euridis_mapping = {
+    0b00: "désactivée",
+    0b01: "activée sans sécurité",
+    0b11: "activée avec sécurité"
+  }
+  resultats["Communication Euridis"] = euridis_mapping.get(euridis, "inconnu")
+
+  # Bits 21-22 : statut CPL
+  cpl_statut = (registre >> 21) & 0b11
+  cpl_mapping = {
+    0b00: "New/Unlock",
+    0b01: "New/Lock",
+    0b10: "Registered"
+  }
+  resultats["Statut CPL"] = cpl_mapping.get(cpl_statut, "inconnu")
+
+  # Bit 23 : synchronisation CPL
+  sync_cpl = (registre >> 23) & 0b1
+  resultats["Synchronisation CPL"] = "non synchronisé" if sync_cpl == 0 else "synchronisé"
+
+  # Bits 24-25 : couleur du jour (Tempo)
+  couleur_jour = (registre >> 24) & 0b11
+  couleur_mapping = {
+    0: "Pas d’annonce",
+    1: "Bleu",
+    2: "Blanc",
+    3: "Rouge"
+  }
+  resultats["Couleur du jour (Tempo)"] = couleur_mapping.get(couleur_jour, "inconnu")
+
+  # Bits 26-27 : couleur du lendemain
+  couleur_demain = (registre >> 26) & 0b11
+  resultats["Couleur du lendemain (Tempo)"] = couleur_mapping.get(couleur_demain, "inconnu")
+
+  # Bits 28-29 : préavis pointes mobiles
+  preavis_pm = (registre >> 28) & 0b11
+  preavis_mapping = {
+    0: "pas de préavis en cours",
+    1: "préavis PM1 en cours",
+    2: "préavis PM2 en cours",
+    3: "préavis PM3 en cours"
+  }
+  resultats["Préavis pointe mobile"] = preavis_mapping.get(preavis_pm, "inconnu")
+
+  # Bits 30-31 : pointe mobile en cours
+  pm_cours = (registre >> 30) & 0b11
+  pm_mapping = {
+    0: "pas de pointe mobile",
+    1: "PM1 en cours",
+    2: "PM2 en cours",
+    3: "PM3 en cours"
+  }
+  resultats["Pointe mobile en cours"] = pm_mapping.get(pm_cours, "inconnu")
+  return resultats
+
 # -------------------------------------------------------------------------------------------------------------
 # |                                 Etendue d'un groupe d'information                                         |
 # -------------------------------------------------------------------------------------------------------------
@@ -404,19 +582,26 @@ def process_teleinfo(bytes: bytes = None):
 
       # Vérification de la somme de contrôle
       if key in linky_ignore_checksum_for_keys or _checksum(str_dataset[0:-1], checksum):
+        if key == 'STGE':
+          decoded_status = linky_decode_status(val)
+          logger.info(f'status: {', '.join([f'{k}={v}' for k, v in decoded_status.items()])}')
+          # val = json.dumps(decoded_status)
+        if key in ['NGTF', 'MSG1', 'LTARF', 'BASE']:
+          val = val.replace('  ', ' ')
         # Ajout de la valeur
         frame[key] = val
       else:
         logger.warning(f'Somme de contrôle erronée pour {key}, checksum: {checksum} / dataset: {dataset}')
 
   num_keys = len(frame)
-  logger.info(f'Trame reçue ({num_keys} étiquettes traités)')
+  logger.info(f'Trame reçue ({num_keys} étiquettes traités, sinsts: {frame["SINSTS"]}, SMAXSN: {frame["SMAXSN"]})')
   # for i,(k,v) in enumerate(frame.items()):
   #  logger.debug(f'frame[{i}]: {k}={v}')
 
   # Horodatage de la trame reçue
   frame['TIME'] = datetime.now().strftime("%Y-%m-%dT%H:%M:%SZ")
   logger.debug(f'FRAME: {frame}')
+
   # Ajout à la queue d'envoi vers InfluxDB
   if influxdb_send_data:
     frame_influxdb_queue.put(frame)
@@ -464,14 +649,16 @@ def linky(log_level=logging.INFO):
       if idx_start == -1 or idx_stop == -1 or idx_start > idx_stop:
         logger.info(f'incomplete frame: start:{idx_start}, end: {idx_stop} , content: {current_bytes}')
         error = 1
-      # exract payload
-      wanted_bytes_line = current_bytes[idx_start + 1:idx_stop]
-      # nouveau dataset demarre avec un Line Feed (LF) character (0x0A, \n)
-      if wanted_bytes_line[0] != 0x0a:
+        wanted_bytes_line = ['']
+      else:
+        # extract payload
+        wanted_bytes_line = current_bytes[idx_start + 1:idx_stop]
+        # nouveau dataset demarre avec un Line Feed (LF) character (0x0A, \n)
+      if wanted_bytes_line[0] != 0x0a and error == 0:
         logger.error(
           f'début incorrect de trame, ne demarre pas avec un LF: {wanted_bytes_line[0]}, {wanted_bytes_line}')
         error = 1
-      elif wanted_bytes_line[-1] not in [0x0d, 0x03]:
+      elif wanted_bytes_line[-1] not in [0x0d, 0x03] and error == 0:
         # dataset termine avec CR(10) sauf si bug: Carriage Return (CR) character (0x0D, \r)
         logger.error(f'fin incorrecte de trame, ne finit pas avec un CR: {wanted_bytes_line[-1]}, {wanted_bytes_line}')
         error = 1
@@ -635,7 +822,7 @@ if __name__ == '__main__':
                                                                      mysql_username=mysql_username,
                                                                      mysql_password=mysql_password,
                                                                      mysql_database=mysql_database,
-                                                                     frame_mysql_queue=frame_mysql_queue)
+                                                                     myframe_queue=frame_mysql_queue)
 
   if mqtt_send_data:
     # Création d'une queue FIFO pour stocker les données
@@ -645,7 +832,7 @@ if __name__ == '__main__':
                                                                   mqtt_password=mqtt_password,
                                                                   mqtt_topic=mqtt_topic, mqtt_qos=mqtt_qos,
                                                                   mqtt_retain=mqtt_retain,
-                                                                  mqtt_queue=frame_mqtt_queue)
+                                                                  myframe_queue=frame_mqtt_queue)
     mqtt_client.loop_start()
 
   # Lance la boucle infinie de lecture de la téléinfo

@@ -2,17 +2,12 @@ services:
   teleinfo:
     image: edgd1er/teleinfo:latest
     container_name: teleinfo
-    build:
-      context: .
-      dockerfile: Dockerfile
-      args: []
     environment:
       TZ: "Europe/Paris"
       DEBUG: True
       #KEYS: "[ ISOUSC, BASE, IINST, ADPS, IMAX, MOTDETAT ]" # Mode historique
       KEYS : "[ ADSC, DATE, VTIC, NGTF,EAST,PREF, PCOUP, SINSTS, MSG1, IRMS, URMS, SMAXSN, SMAXSN-1 ]" #Mode Standard
       LEGACY: False #True=historique, False=standard
-      CHECKSUM: 2 #1 ou 2
       CITY: "Paris" #utilisé par influxdb
       INFLUX_SEND: "False"
       INFLUX_URL: ""
