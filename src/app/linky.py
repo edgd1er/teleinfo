@@ -306,7 +306,7 @@ def _send_data_to_mysql(mycnx: PooledMySQLConnection = None, mysqlframe_queue=No
   /  enregistre la puissance instantanée en V.A et en W
   :return:
   """
-  mycursor = mycnx.cursor()
+
   while True:
     framemysql = mysqlframe_queue.get()
     tcolumns = ""
@@ -333,15 +333,14 @@ def _send_data_to_mysql(mycnx: PooledMySQLConnection = None, mysqlframe_queue=No
           f'INSERT INTO frame ({tcolumns[:-1]}) '
           f'VALUES ({tformat[:-1]})'
         )
-        mycursor.execute(insert_stmt, tvalues)
+        with mycnx.cursor() as mycursor:
+          mycursor.execute(insert_stmt, tvalues)
         mycnx.commit()
       except mysql.connector.errors.ProgrammingError as exc:
         logger.error(f'Erreur MySQL insert: {tcolumns} ## {tvalues}')
         logger.error(f'Erreur MySQL insert: {exc}', exc_info=True)
       except Exception as e:
         logger.error(f'Erreur MySQL: {e}', exc_info=True)
-
-  mycursor.close()
 
 
 def format_payload_for_teleinfo_jeedom(frame: {} = {}) -> str:
