@@ -1,7 +1,12 @@
 #!/bin/sh
 
-echo "Generate linky conf file"
-envsubst < /app/config.yaml.template > /config/config.yml
+if [[ ${HTTP_SERVER:-false} =~ "nofalse0" ]]; then
+   echo "Generate web server configuration"
+  envsubst < /app/param.cfg.template > /config/param.cfg
+  echo "starting web service"
+  supervisorctl start http_plot
+echo "end"
+fi
 
 echo "starting linky service"
 supervisorctl start linky

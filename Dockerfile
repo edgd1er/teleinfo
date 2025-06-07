@@ -1,12 +1,11 @@
-FROM alpine:3.21
+FROM alpine:3.22
 
 ENV DEBUG=false \
     TZDATA="Europe/Paris" \
     CITY="Paris" \
     LEGACY=false \
-    CHECKSUM=1 \
     KEYS="ISOUSC BASE IINST" \
-    PORT='ttyS0' \
+    PORT='ttyserial0' \
     SLEEP_INTERVAL=60 \
     INFLUX_SEND=false \
     MYSQL_SEND=false \
@@ -14,6 +13,12 @@ ENV DEBUG=false \
     MQTT_TOPIC="linky" \
     MQTT_QOS=0 \
     MQTT_RETAIN=False \
+    MQTT_TLS=False \
+    MQTT_TLS_CA="" \
+    MQTT_TLS_INSECURE=True \
+    MQTT_TLS_CLIENT_CERT="" \
+    MQTT_TLS_CLIENT_KEY="" \
+    MQTT_TLS_CLIENT_PASSWORD="" \
     MQTT_4JEEDOM=False \
     IGNORE_KEYS_CHEKSUM="[]"
 
@@ -48,7 +53,7 @@ RUN apk add --no-cache  tzdata supervisor mariadb-common mariadb-client mariadb-
     && cp /etc/supervisord.conf /etc/supervisord.conf.package \
     && sed -i "s#;nodaemon=false#nodaemon=true#" /etc/supervisord.conf \
     && sed -i "s#;loglevel=info#loglevel=info#" /etc/supervisord.conf \
-    && pip3 install --break-system-packages influxdb-client mysql-connector-python
+    && pip3 install --break-system-packages influxdb-client mysql-connector-python http-plot-server
 
 RUN if [ false != ${DEBUG:-false} ]; then apk add bash vim; fi ;
 

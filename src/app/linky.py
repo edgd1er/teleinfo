@@ -3,7 +3,6 @@
 # -*- coding: utf-8 -*-
 # __author__ = "Hervé Le Roy"
 # __licence__ = "GNU General Public License v3.0"
-import json
 #  apt install -y python3-serial python3-mysqldb python3-influxdb
 # Python 3, pré-requis : pip install PyYAML pySerial influxdb-client
 
@@ -12,28 +11,29 @@ import json
 # * Afficher des informations depuis le thread principal
 # * Tester plusieurs scénarios d'erreurs InfluxDB (iptables sur serveur, arrêt du serveur)
 
+import argparse
+import json
 import logging
+import os
+import random
 import re
-from multiprocessing import Process, Queue
 import signal
+import ssl
 import termios
 import time
 from datetime import datetime
-import argparse
-import os
-import random
+from multiprocessing import Process, Queue
 
+import mysql.connector
 import serial
-import yaml
-from influxdb_client import InfluxDBClient, Point
+from influxdb_client import InfluxDBClient, Point, BucketRetentionRules
 from influxdb_client.client.exceptions import InfluxDBError
 from influxdb_client.client.write_api import SYNCHRONOUS, PointSettings
 from influxdb_client.rest import ApiException
 from mysql.connector.pooling import PooledMySQLConnection
+from paho.mqtt import client as mqtt_client
 from urllib3 import Retry
 from urllib3.exceptions import HTTPError
-import mysql.connector
-from paho.mqtt import client as mqtt_client
 
 logger = logging.getLogger(__name__)
 LDIR = os.path.dirname(os.path.realpath(__file__))
@@ -104,6 +104,7 @@ MYSQL_DB_DATATYPE = {"ADSC": ["bigint unsigned", 0], "VTIC": ["tinyint  UNSIGNED
 def create_influxdb_client_and_thread(influxdb_url: str = "", influxdb_token: str = "", influxdb_org: str = "",
                                       linky_location: str = "Paris", influxdb_bucket: str = "",
                                       myframe_queue: Queue = None):
+  mybucket = None
   # Connexion à InfluxDB
   try:
     logger.info(f'Connexion à {influxdb_url}')
@@ -112,6 +113,25 @@ def create_influxdb_client_and_thread(influxdb_url: str = "", influxdb_token: st
                                      token=influxdb_token,
                                      org=influxdb_org,
                                      retries=retries)
+
+    logger.debug(f'creation de l\'api orgs')
+    orgs_api = influxdb_client.organizations_api()
+    # Create organization
+    org = orgs_api.create_organization(name=influxdb_org)
+    logger.info(f'Organization {influxdb_org} created')
+
+    logger.debug(f'creation de l\'api bucket')
+    buckets_api = influxdb_client.buckets_api()
+    bucket_retention_seconds = None  # days * 86400  # Convert days to seconds
+    if bucket_retention_seconds is None:
+      retention_rules = []
+    else:
+      retention_rules = [BucketRetentionRules(type="expire", every_seconds=bucket_retention_seconds)]
+
+    # create bucket
+
+    bucket = buckets_api.create_bucket(name=influxdb_bucket, org_id=org.id, retention_rules=retention_rules)
+    logger.info(f"Bucket '{influxdb_bucket}' dans l'organisation '{influxdb_org}' crée.")
 
   except InfluxDBError as exc:
     logger.error(f'Erreur de connexion à InfluxDB: {exc}')
@@ -164,7 +184,9 @@ def create_mysql_client_and_thread(mysql_host: str = "", mysql_port: int = 3306,
   return mycnx, send_mysql_thread
 
 
-#################################################################################################"
+#################################################################################################
+# mqtt-client
+
 def on_connect(client, userdata, flags, rc):
   # For paho-mqtt 2.0.0, you need to add the properties parameter.
   # def on_connect(client, userdata, flags, rc, properties):
@@ -193,17 +215,47 @@ def on_disconnect(client, userdata, rc):
 def create_mqtt_client_and_thread(mqtt_host: str = None, mqtt_port: int = 1883, mqtt_username: str = "",
                                   mqtt_password: str = "",
                                   mqtt_topic: str = "mytopic", mqtt_qos: int = 0, mqtt_retain: bool = False,
-                                  myframe_queue: Queue = None):
+                                  myframe_queue: Queue = None, mytls: {} = None):
+  logger.debug(f'MQTT Broker {mqtt_username}@{mqtt_host}:{mqtt_port}')
+
   client = mqtt_client.Client(f'linky-teleinfo-{random.randint(0, 1000)}')
   # For paho-mqtt 2.0.0, you need to set callback_api_version.
   # client = mqtt_client.Client(client_id=client_id, callback_api_version=mqtt_client.CallbackAPIVersion.VERSION2)
-  client.username_pw_set(mqtt_username, mqtt_password)
   client.on_connect = on_connect
   client.on_publish = on_publish
   client.on_disconnect = on_disconnect
-  client.connect(mqtt_host, mqtt_port)
 
-  # Démarrage du thread d'envoi vers mysql
+  logger.debug(f'mytls: {mytls}')
+  ca_certs = mytls['mqtt_tls_ca']
+  certfile = mytls['mqtt_tls_client_certificate']
+  keyfile = mytls['mqtt_tls_client_key']
+  keyfile_password = mytls['mqtt_tls_client_password']
+  insecure = mytls['mqtt_tls_insecure']
+  tls_enabled = mytls['mqtt_tls'].lower() in ('1','t','true')
+
+  if tls_enabled:
+    if os.path.exists(keyfile):
+      # Connect to the MQTT broker using a client certificate
+      client.tls_set(ca_certs=ca_certs,
+                     certfile=certfile,
+                     keyfile=keyfile,
+                     keyfile_password=keyfile_password,
+                     tls_version=ssl.PROTOCOL_TLSv1_2)
+    else:
+      # Connect to the MQTT broker using a username/password with tls
+      client.tls_set(ca_certs=ca_certs, tls_version=ssl.PROTOCOL_TLSv1_2)
+      client.username_pw_set(mqtt_username, mqtt_password)  # specify the username and password
+
+    client.tls_insecure_set(insecure)
+  else:
+    # Connect to the MQTT broker using a username/password
+    client.username_pw_set(mqtt_username, mqtt_password)
+
+  client.connect(mqtt_host, mqtt_port)
+  client.reconnect_delay_set(min_delay=5, max_delay=5)
+
+
+# Démarrage du thread d'envoi vers mysql
   logger.info(f'Démarrage du thread d\'envoi vers mqtt #{mqtt_topic}')
   send_mqtt_thread = Process(target=_send_data_to_mqtt,
                              args=(client, myframe_queue, mqtt_topic, mqtt_qos, mqtt_retain), daemon=True)
@@ -533,6 +585,7 @@ def linky_decode_status(hex_str: str = ""):
   resultats["Pointe mobile en cours"] = pm_mapping.get(pm_cours, "inconnu")
   return resultats
 
+
 # -------------------------------------------------------------------------------------------------------------
 # |                                 Etendue d'un groupe d'information                                         |
 # -------------------------------------------------------------------------------------------------------------
@@ -550,6 +603,9 @@ def process_teleinfo(bytes: bytes = None):
 
   # un caractère "Line Feed" LF (0x0 A) indiquant le début du groupe => split sur ce separateur.
   datasets = list(filter(lambda x: len(x) > 1, bytes.split(b'\n')))
+  tagsdataset = list(map(lambda x: x.decode('ascii').strip('\r').split()[0], datasets))
+
+  logger.debug(f'tagsdataset: {tagsdataset}')
 
   logger.debug(f'#datasets: {len(datasets)}')
   for i, dataset in enumerate(datasets):
@@ -586,14 +642,30 @@ def process_teleinfo(bytes: bytes = None):
           logger.info(f'status: {', '.join([f'{k}={v}' for k, v in decoded_status.items()])}')
           # val = json.dumps(decoded_status)
         if key in ['NGTF', 'MSG1', 'LTARF', 'BASE']:
-          val = val.replace('  ', ' ')
+          # suppression des doubles espaces
+          val = re.sub(r"\s+", " ", val)
         # Ajout de la valeur
         frame[key] = val
       else:
         logger.warning(f'Somme de contrôle erronée pour {key}, checksum: {checksum} / dataset: {dataset}')
 
+  tagsprocessed = frame.keys()
+  errorstags = [x for x in tagsdataset if x not in tagsprocessed]
+  if len(errorstags) > 0:
+    logger.error(f'tags en erreurs: {errorstags}')
+
   num_keys = len(frame)
-  logger.info(f'Trame reçue ({num_keys} étiquettes traités, sinsts: {frame["SINSTS"]}, SMAXSN: {frame["SMAXSN"]})')
+  if 'SINSTS' in frame.keys():
+    sinsts = frame["SINSTS"]
+  else:
+    sinsts = "vide"
+  if 'SMAXSN' in frame.keys():
+    smaxsn = frame["SMAXSN"]
+  else:
+    smaxsn = "vide"
+
+  logger.info(
+    f'Trame reçue ({num_keys} étiquettes traités, sinsts: {sinsts}, SMAXSN: {smaxsn}, ({len(tagsdataset)}-{len(tagsprocessed)}={len(errorstags)}, {errorstags})')
   # for i,(k,v) in enumerate(frame.items()):
   #  logger.debug(f'frame[{i}]: {k}={v}')
 
@@ -627,7 +699,7 @@ def linky(log_level=logging.INFO):
   try:
     baudrate = 1200 if linky_legacy_mode else 9600
     logger.info(f'Ouverture du port série {raspberry_stty_port} à {baudrate} Bd')
-    ser = serial.Serial(port=raspberry_stty_port,
+    ser = serial.Serial(port=f'/dev/{raspberry_stty_port}',
                         baudrate=baudrate,
                         parity=serial.PARITY_EVEN,
                         stopbits=serial.STOPBITS_ONE,
@@ -643,7 +715,8 @@ def linky(log_level=logging.INFO):
       # logger.debug(f'nouvelle trame trouvée, ignore: {not_wanted_line}')
       current_bytes = ser.read_until(STOP_FRAME)  # lecture jusqu a la fin de la trame
       idx_start = current_bytes.find(START_FRAME)  # Recherche du caractère de début de trame, c'est-à-dire STX 0x02
-      idx_stop = current_bytes.find(STOP_FRAME)  # Recherche du caractère de fin de trame, c'est-à-dire STX 0x03
+      idx_stop = current_bytes.find(STOP_FRAME,
+                                    idx_start)  # Recherche du caractère de fin de trame, c'est-à-dire STX 0x03
       # logger.debug(f'current_bytes: {idx_start},{idx_start},{current_bytes}')
       if idx_start == -1 or idx_stop == -1 or idx_start > idx_stop:
         logger.info(f'incomplete frame: start:{idx_start}, end: {idx_stop} , content: {current_bytes}')
@@ -670,7 +743,7 @@ def linky(log_level=logging.INFO):
 
   except serial.SerialException as exc:
     if exc.errno == 13:
-      logger.error('Erreur de permission sur le port série')
+      logger.error(f'Erreur de permission sur le port série: {exc}')
       logger.error('Avez-vous ajouté l\'utilisateur au groupe dialout ?')
       logger.error('  $ sudo usermod -G dialout $USER')
       logger.error(
@@ -680,8 +753,8 @@ def linky(log_level=logging.INFO):
     ser.close()
     raise SystemExit(1)
 
-  except termios.error:
-    logger.error('Erreur lors de la configuration du port série')
+  except termios.error as e:
+    logger.error(f'Erreur lors de la configuration du port série: {e}')
     if raspberry_stty_port == '/dev/ttyS0':
       logger.error('Essayez d\'utiliser /dev/ttyAMA0 plutôt que /dev/ttyS0')
     ser.close()
@@ -689,29 +762,6 @@ def linky(log_level=logging.INFO):
 
   finally:
     ser.close()
-
-
-def read_conf(conffile: str = "", debug: bool = False):
-  try:
-    with open(conffile, "r") as f:
-      cfg = yaml.load(f, Loader=yaml.SafeLoader)
-  except FileNotFoundError:
-    logger.error('Il manque le fichier de configuration config.yml')
-    raise SystemExit(1)
-  except yaml.YAMLError as exc:
-    if hasattr(exc, 'problem_mark'):
-      mark = exc.problem_mark
-      logger.error('Le fichier de configuration comporte une erreur de syntaxe')
-      logger.error(f'La position de l\'erreur semble être en ligne {mark.line + 1} colonne {mark.column + 1}')
-      raise SystemExit(1)
-  except (OSError, IOError):
-    logger.error('Erreur de lecture du fichier config.yml. Vérifiez les permissions ?')
-    raise SystemExit(1)
-  except Exception:
-    logging.critical('Erreur lors de la lecture du fichier de configuration', exc_info=True)
-    raise SystemExit(1)
-  logger.debug(f'cfg')
-  return cfg
 
 
 if __name__ == '__main__':
@@ -739,11 +789,8 @@ if __name__ == '__main__':
   # Capture élégamment une interruption par CTRL+C
   signal.signal(signal.SIGINT, _handler)
 
-  # Lecture du fichier de configuration
-  cfg = read_conf(conffile=conffile)
-
   # Configuration du logger en mode debug
-  debug = cfg.get('debug', False)
+  debug = os.getenv('DEBUG', False)
   log_level = logging.INFO
   if args.verbose or debug:
     log_level = logging.DEBUG
@@ -751,61 +798,31 @@ if __name__ == '__main__':
     log_level = logging.ERROR
   # logging.getLogger().setLevel(log_level)
   logger.setLevel(log_level)
-  logger.debug(f'log_level: {log_level}, debug: {debug}, conf: {conffile}, cfg: {cfg}')
+  logger.debug(f'log_level: {log_level}, debug: {debug}')
 
-  try:
-    debug = cfg.get('debug', False)
-    linky_location = cfg['linky']['location']
-    linky_legacy_mode = cfg['linky']['legacy_mode']
-    linky_checksum_method = cfg['linky'].get('checksum_method', DEFAULT_CHECKSUM_METHOD)
-    linky_ignore_checksum_for_keys = cfg['linky'].get('ignore_checksum_for_keys', '[]')
-    linky_keys = cfg['linky'].get('keys', DEFAULT_KEYS)
-    linky_sleep_interval = cfg['linky'].get('sleep_interval', DEFAULT_INTERVAL)
+  linky_location = os.getenv('CITY', 'Paris')
+  linky_legacy_mode = os.getenv('LEGACY', False) in ('true', '1', 't')
+  linky_ignore_checksum_for_keys = os.getenv('IGNORE_KEYS_CHEKSUM', '[]')
+  linky_keys = list(map(lambda  x:x.strip(), os.getenv('KEYS', "ISOUSC BASE IINST").split(',')))
+  #linky_keys = [ x.strip() for x in os.getenv('KEYS', "ISOUSC BASE IINST").split(',') ]
+  linky_sleep_interval = int(os.getenv('SLEEP_INTERVAL', DEFAULT_INTERVAL))
 
-    raspberry_stty_port = cfg['raspberry']['stty_port']
+  raspberry_stty_port = os.getenv('PORT', 'ttyS0').replace("/dev/", "")
 
-    influxdb_send_data = cfg['influxdb']['send_data']
+  # exporters
+  influxdb_send_data = os.getenv('INFLUX_SEND', 'false').lower() in ('true', '1', 't')
+  mysql_send_data = os.getenv('MYSQL_SEND', 'false') in ('true', '1', 't')
+  mqtt_send_data = os.getenv('MQTT_SEND', 'False') in ('true', '1', 't')
+  mqtt_teleinfo4jeedom = os.getenv('MQTT_4JEEDOM', 'False') in ('true', '1', 't')
 
-    mysql_send_data = cfg['mysql']['send_data']
-
-    mqtt_send_data = cfg['mqtt']['send_data']
-    mqtt_teleinfo4jeedom = cfg['mqtt']['teleinfo4jeedom']
-
-    if influxdb_send_data:
-      influxdb_url = cfg['influxdb']['url']
-      influxdb_bucket = cfg['influxdb']['bucket']
-      influxdb_token = cfg['influxdb']['token']
-      influxdb_org = cfg['influxdb']['org']
-    if mysql_send_data:
-      mysql_host = cfg['mysql']['host']
-      mysql_port = cfg['mysql']['port']
-      mysql_username = cfg['mysql']['username']
-      mysql_password = cfg['mysql']['password']
-      mysql_database = cfg['mysql']['database']
-    if mqtt_send_data:
-      mqtt_host = cfg['mqtt']['host']
-      mqtt_port = cfg['mqtt']['port']
-      mqtt_username = cfg['mqtt']['username']
-      mqtt_password = cfg['mqtt']['password']
-      mqtt_topic = cfg['mqtt']['topic']
-      mqtt_retain = cfg['mqtt']['retain']
-      mqtt_qos = cfg['mqtt']['qos']
-
-
-  except KeyError as exc:
-    logger.error(f'Erreur : il manque la clé {exc} dans le fichier de configuration')
-    raise SystemExit(1)
-  except Exception:
-    logging.critical('Erreur lors de la lecture du fichier de configuration', exc_info=True)
-    raise SystemExit(1)
-
-  logger.info(f'linky_keys: {linky_keys}')
-  # frame_sqlite_queue= queue.Queue()
-  # frame_mqqt_queue= queue.Queue()
-
+  # prepare needed informations
   write_client = None
-  # InfluxDB
   if influxdb_send_data:
+    logger.debug(f'influxdb_send_data: {influxdb_send_data}, {type(influxdb_send_data)}')
+    influxdb_url = os.getenv('INFLUX_URL', '')
+    influxdb_bucket = os.getenv('INFLUX_BUCKET', '')
+    influxdb_token = os.getenv('INFLUX_TOKEN', '')
+    influxdb_org = os.getenv('INFLUX_ORG', 'org')
     # Création d'une queue FIFO pour stocker les données
     frame_influxdb_queue = Queue()
     write_client, send_influx_thread = create_influxdb_client_and_thread(influxdb_url=influxdb_url,
@@ -815,6 +832,11 @@ if __name__ == '__main__':
                                                                          myframe_queue=frame_influxdb_queue)
 
   if mysql_send_data:
+    mysql_host = os.getenv('MYSQL_HOST', 'localhost')
+    mysql_port = int(os.getenv('MYSQL_PORT', 3306))
+    mysql_username = os.getenv('MYSQL_USERNAME', '')
+    mysql_password = os.getenv('MYSQL_PASSWORD', '')
+    mysql_database = os.getenv('MYSQL_DB', 'linky')
     # Création d'une queue FIFO pour stocker les données
     frame_mysql_queue = Queue()
     mysql_client, send_mysql_thread = create_mysql_client_and_thread(mysql_host=mysql_host, mysql_port=mysql_port,
@@ -822,17 +844,29 @@ if __name__ == '__main__':
                                                                      mysql_password=mysql_password,
                                                                      mysql_database=mysql_database,
                                                                      myframe_queue=frame_mysql_queue)
-
   if mqtt_send_data:
+    mqtt_host = os.getenv('MQTT_HOST', 'localhost')
+    mqtt_port = int(os.getenv('MQTT_PORT', 1883))
+    mqtt_username = os.getenv('MQTT_USERNAME', '')
+    mqtt_password = os.getenv('MQTT_PASSWORD', '')
+    mqtt_topic = os.getenv('MQTT_TOPIC', 'linky')
+    mqtt_retain = os.getenv('MQTT_RETAIN', False) in ('true', '1', 't')
+    mqtt_qos = int(os.getenv('MQTT_QOS', 0))
+    mytls = dict()
+    mytls['mqtt_tls'] = os.getenv('MQTT_TLS', False)
+    mytls['mqtt_tls_insecure'] = os.getenv('MQTT_TLS_INSECURE', 'False') in ('true', '1', 't')
+    mytls['mqtt_tls_ca'] = os.getenv('MQTT_TLS_CA', '')
+    mytls['mqtt_tls_client_certificate'] = os.getenv('MQTT_TLS_CLIENT_CERT', '')
+    mytls['mqtt_tls_client_key'] = os.getenv('MQTT_TLS_CLIENT_KEY', '')
+    mytls['mqtt_tls_client_password'] = os.getenv('MQTT_TLS_CLIENT_PASSWORD', '')
     # Création d'une queue FIFO pour stocker les données
     frame_mqtt_queue = Queue()
-    mqtt_client, send_mqtt_thread = create_mqtt_client_and_thread(mqtt_host=mqtt_host, mqtt_port=mqtt_port,
+    mymqtt_client, send_mqtt_thread = create_mqtt_client_and_thread(mqtt_host=mqtt_host, mqtt_port=mqtt_port,
                                                                   mqtt_username=mqtt_username,
                                                                   mqtt_password=mqtt_password,
                                                                   mqtt_topic=mqtt_topic, mqtt_qos=mqtt_qos,
                                                                   mqtt_retain=mqtt_retain,
-                                                                  myframe_queue=frame_mqtt_queue)
-    mqtt_client.loop_start()
-
+                                                                  myframe_queue=frame_mqtt_queue, mytls=mytls)
+    mymqtt_client.loop_start()
   # Lance la boucle infinie de lecture de la téléinfo
   linky(log_level=log_level)

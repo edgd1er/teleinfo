@@ -5,27 +5,42 @@ services:
     environment:
       TZ: "Europe/Paris"
       DEBUG: True
-      #KEYS: "[ ISOUSC, BASE, IINST, ADPS, IMAX, MOTDETAT ]" # Mode historique
-      KEYS : "[ ADSC, DATE, VTIC, NGTF,EAST,PREF, PCOUP, SINSTS, MSG1, IRMS, URMS, SMAXSN, SMAXSN-1 ]" #Mode Standard
-      LEGACY: False #True=historique, False=standard
-      CITY: "Paris" #utilisé par influxdb
-      INFLUX_SEND: "False"
-      INFLUX_URL: ""
-      INFLUX_BUCKET: ""
-      INFLUX_TOKEN: ""
-      INFLUX_ORG: ""
-      MYSQL_SEND: true
-      MYSQL_HOST: "mysql"
-      MYSQL_PORT: 3306
-      MYSQL_USERNAME: "linky"
-      MYSQL_PASSWORD: "linky"
-      MYSQL_DB: "linky"
-      MQTT_SEND: true
-      MQTT_HOST: "mqtt"
-      MQTT_PORT: 1883
-      MQTT_TOPIC: "linky"
-      MQTT_USERNAME: "linky"
-      MQTT_PASSWORD: "linky"
+      PORT : "ttyserial0"
+      #KEYS: "ADCO, ISOUSC, BASE, HCHC,HCHP, EJPHN, EJPHPM, BBRHCJB, BBRHPJB, BBRHCJW, BBRHCJR, BBRHPJR, PEJP,PTEC, DEMAIN, IINST, ADPS, IMAX, PAPP, HHPHC, MOTDETAT" # Mode historique
+      #KEYS: "ADCO, ADSC, VTIC, DATE, NGTF, LTARF, EAST, EASF01, EASF02, EASF03, EASF04, EASF05, EASF06, EASF07, EASF08, EASF09, EASF10, EAIT, ERQ1, ERQ2, ERQ3, ERQ4, IRMS1, IRMS2, IRMS3, URMS1, URMS2, URMS3, PREF, PCOUP, SINSTS, SINSTS1, SINSTS2, SINSTS3, MSG1, SMAXSN, SMAXSN-1, SINSTI, SMAXIN, CCASN, CCASN-1, CCAIN, UMOY1, UMOY2, UMOY3, STGE, MSG1, MSG2, PRM, RELAIS, NTARF, NJOURF, NJOURF+1, PJOUR+1, PPOINTE" #Mode Standard
+      KEYS : "ALL" #Mode Standard
+      #IGNORE_KEYS_CHEKSUM: [ 'PJOURF+1' ]"
+      DEBUG : True
+      LEGACY : False #True=historique, False=standard
+      SLEEP_INTERVAL : 60
+      CITY : "Paris"
+      HTTP_SERVER : False
+      INFLUX_SEND : False
+      INFLUX_URL : "http://influxdb:8086/"
+      INFLUX_BUCKET : "linkyb"
+      INFLUX_TOKEN : "linky:linky" #username:password for influxdb v1
+      INFLUX_ORG : "linky.org"
+      MYSQL_SEND : True
+      MYSQL_HOST : "mysql"
+      MYSQL_PORT : 3306
+      MYSQL_USERNAME : "username"
+      MYSQL_PASSWORD : "password"
+      MYSQL_DB : "linky"
+      MQTT_SEND : true
+      MQTT_HOST : "mqtt"
+      MQTT_PORT : 1883
+      MQTT_TOPIC : "teleinfo"
+      MQTT_QOS : 0
+      MQTT_RETAIN : False
+      MQTT_USERNAME : "username"
+      MQTT_PASSWORD : "password"
+      MQTT_4JEEDOM : True
+      MQTT_TLS : False
+      MQTT_TLS_INSECURE : True
+      MQTT_TLS_CA : "/config/cas.cert.pem"
+      MQTT_TLS_CLIENT_CERT : ""
+      MQTT_TLS_CLIENT_KEY : ""
+      MQTT_TLS_CLIENT_PASSWORD : ""
     devices:
       # ttyS0: pi3+>
       #- /dev/ttyS0:/dev/ttyserial0

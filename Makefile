@@ -17,3 +17,6 @@ db: ## start mysql + mqtt
 logs: ## logs teleinfo
 		@echo "logs teleinfo"
 		docker compose logs -f teleinfo
+
+mqttpasswd:
+		docker compose exec mqtt /usr/bin/mosquitto_passwd -U /mosquitto/config/passwords.txt
