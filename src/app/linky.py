@@ -25,6 +25,7 @@ from datetime import datetime
 from multiprocessing import Process, Queue
 
 import mysql.connector
+import requests
 import serial
 from influxdb_client import InfluxDBClient, Point, BucketRetentionRules
 from influxdb_client.client.exceptions import InfluxDBError
@@ -97,6 +98,18 @@ MYSQL_DB_DATATYPE = {"ADSC": ["bigint unsigned", 0], "VTIC": ["tinyint  UNSIGNED
                      "NJOURFPLUS1": ["TINYINT UNSIGNED", 0],
                      "PJOURFPLUS1": ["VARCHAR(98)", ""],
                      "TIME": ["TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP, PRIMARY KEY (`TIME`)", "NULL"]}
+
+
+#################################################################################################
+# send data to http-server-plot
+
+def send_data_to_server(data: {} = None):
+  if os.getenv('HTTP_SERVER', 'false').lower() in ('true', 't', 'y', '1'):
+    try:
+      resp = requests.post(url, json=data)
+      logger.debug(f'resp: {resp.status_code}')
+    except Exception as e:
+      logger.error(f'Exception: {e}')
 
 
 #################################################################################################
@@ -231,7 +244,7 @@ def create_mqtt_client_and_thread(mqtt_host: str = None, mqtt_port: int = 1883, 
   keyfile = mytls['mqtt_tls_client_key']
   keyfile_password = mytls['mqtt_tls_client_password']
   insecure = mytls['mqtt_tls_insecure']
-  tls_enabled = mytls['mqtt_tls'].lower() in ('1','t','true')
+  tls_enabled = mytls['mqtt_tls'].lower() in ('1', 't', 'true')
 
   if tls_enabled:
     if os.path.exists(keyfile):
@@ -254,8 +267,7 @@ def create_mqtt_client_and_thread(mqtt_host: str = None, mqtt_port: int = 1883, 
   client.connect(mqtt_host, mqtt_port)
   client.reconnect_delay_set(min_delay=5, max_delay=5)
 
-
-# Démarrage du thread d'envoi vers mysql
+  # Démarrage du thread d'envoi vers mysql
   logger.info(f'Démarrage du thread d\'envoi vers mqtt #{mqtt_topic}')
   send_mqtt_thread = Process(target=_send_data_to_mqtt,
                              args=(client, myframe_queue, mqtt_topic, mqtt_qos, mqtt_retain), daemon=True)
@@ -282,8 +294,8 @@ def _handler(signum, frame):
     send_mysql_thread.join(5)
 
   if mqtt_send_data:
-    mqtt_client.loop_stop()
-    mqtt_client.disconnect()
+    mymqtt_client.loop_stop()
+    mymqtt_client.disconnect()
     frame_mqtt_queue.close()
     send_mqtt_thread.join(5)
 
@@ -664,6 +676,9 @@ def process_teleinfo(bytes: bytes = None):
   else:
     smaxsn = "vide"
 
+  send_data_to_server(
+    {'tag': 'Linky - VA inst', 'value': int(0 if sinsts=='vide' else sinsts), 'ts': int(datetime.now().timestamp()), 'unit': 'VA'})
+
   logger.info(
     f'Trame reçue ({num_keys} étiquettes traités, sinsts: {sinsts}, SMAXSN: {smaxsn}, ({len(tagsdataset)}-{len(tagsprocessed)}={len(errorstags)}, {errorstags})')
   # for i,(k,v) in enumerate(frame.items()):
@@ -803,11 +818,16 @@ if __name__ == '__main__':
   linky_location = os.getenv('CITY', 'Paris')
   linky_legacy_mode = os.getenv('LEGACY', False) in ('true', '1', 't')
   linky_ignore_checksum_for_keys = os.getenv('IGNORE_KEYS_CHEKSUM', '[]')
-  linky_keys = list(map(lambda  x:x.strip(), os.getenv('KEYS', "ISOUSC BASE IINST").split(',')))
-  #linky_keys = [ x.strip() for x in os.getenv('KEYS', "ISOUSC BASE IINST").split(',') ]
+  linky_keys = list(map(lambda x: x.strip(), os.getenv('KEYS', "ISOUSC BASE IINST").split(',')))
+  # linky_keys = [ x.strip() for x in os.getenv('KEYS', "ISOUSC BASE IINST").split(',') ]
   linky_sleep_interval = int(os.getenv('SLEEP_INTERVAL', DEFAULT_INTERVAL))
 
   raspberry_stty_port = os.getenv('PORT', 'ttyS0').replace("/dev/", "")
+
+  # http_server
+  host = os.getenv('HTTP_IP', '0.0.0.0')
+  port = os.getenv('HTTP_PORT', 8080)
+  url = f"http://{host}:{port}"
 
   # exporters
   influxdb_send_data = os.getenv('INFLUX_SEND', 'false').lower() in ('true', '1', 't')
@@ -862,11 +882,11 @@ if __name__ == '__main__':
     # Création d'une queue FIFO pour stocker les données
     frame_mqtt_queue = Queue()
     mymqtt_client, send_mqtt_thread = create_mqtt_client_and_thread(mqtt_host=mqtt_host, mqtt_port=mqtt_port,
-                                                                  mqtt_username=mqtt_username,
-                                                                  mqtt_password=mqtt_password,
-                                                                  mqtt_topic=mqtt_topic, mqtt_qos=mqtt_qos,
-                                                                  mqtt_retain=mqtt_retain,
-                                                                  myframe_queue=frame_mqtt_queue, mytls=mytls)
+                                                                    mqtt_username=mqtt_username,
+                                                                    mqtt_password=mqtt_password,
+                                                                    mqtt_topic=mqtt_topic, mqtt_qos=mqtt_qos,
+                                                                    mqtt_retain=mqtt_retain,
+                                                                    myframe_queue=frame_mqtt_queue, mytls=mytls)
     mymqtt_client.loop_start()
   # Lance la boucle infinie de lecture de la téléinfo
   linky(log_level=log_level)

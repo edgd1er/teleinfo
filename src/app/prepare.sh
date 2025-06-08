@@ -1,11 +1,16 @@
-#!/bin/sh
+#!/bin/bash
 
-if [[ ${HTTP_SERVER:-false} =~ "nofalse0" ]]; then
-   echo "Generate web server configuration"
-  envsubst < /app/param.cfg.template > /config/param.cfg
+h=${HTTP_SERVER:-false}
+if [[ ! "nofalse0" =~ ${h,,} ]]; then
   echo "starting web service"
   supervisorctl start http_plot
-echo "end"
+  sleep 5
+  s=${MYSQL_SEND:-false}
+  if [[ "true1yes" =~ ${s,,} ]]; then
+    echo "Populate graph with data"
+    python3 /app/data_injector.py
+  fi
+  echo "end"
 fi
 
 echo "starting linky service"

@@ -20,3 +20,6 @@ logs: ## logs teleinfo
 
 mqttpasswd:
 		docker compose exec mqtt /usr/bin/mosquitto_passwd -U /mosquitto/config/passwords.txt
+
+make exe:
+		docker compose exec teleinfo ash

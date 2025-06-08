@@ -7,6 +7,9 @@ ENV DEBUG=false \
     KEYS="ISOUSC BASE IINST" \
     PORT='ttyserial0' \
     SLEEP_INTERVAL=60 \
+    HTTP_SERVER="False" \
+    HTTP_IP="0.0.0.0" \
+    HTTP_PORT="8080" \
     INFLUX_SEND=false \
     MYSQL_SEND=false \
     MQTT_SEND=false \
@@ -48,13 +51,15 @@ ENV DEBUG=false \
     # HHPHC    : Horaire Heures Pleines Heures Creuses
     # MOTDETAT : Mot d'état du compteur
 
-RUN apk add --no-cache  tzdata supervisor mariadb-common mariadb-client mariadb-connector-c \
+RUN apk add --no-cache bash tzdata supervisor mariadb-common mariadb-client mariadb-connector-c \
     py3-mysqlclient python3 py3-pip gettext py3-pyserial py3-yaml py3-influxdb py3-paho-mqtt \
     && cp /etc/supervisord.conf /etc/supervisord.conf.package \
     && sed -i "s#;nodaemon=false#nodaemon=true#" /etc/supervisord.conf \
     && sed -i "s#;loglevel=info#loglevel=info#" /etc/supervisord.conf \
     && pip3 install --break-system-packages influxdb-client mysql-connector-python http-plot-server
 
+RUN adduser --disabled-password --gecos "" --home "$(pwd)" \
+    --ingroup "www-data" --no-create-home --uid "123456"  www-data
 RUN if [ false != ${DEBUG:-false} ]; then apk add bash vim; fi ;
 
 ADD --chmod=750 /src/app/ /app/

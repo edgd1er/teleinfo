@@ -1,28 +1,37 @@
 # Teleinfo
 
- Récuperer l'info du TIC du compteur EDF, puis l'envoyer au choix sur une base influx, mysql ou un serveur de message (mqtt).
+### But:
+  * Récupérer l'info du TIC du compteur EDF depuis le port série
+  * envoi optionnel sur mysql
+  * envoi optionnel sur mqtt
+  * envoi optionnel sur influxdb mais non operationnel.(pas de v2 disponible pour un rpi2, la v1.8 semble ne pas gerer les buckets)
 
-* Lecture en continu du port série avec calage sur le début d'une trame
-* espacement des lectures parametrables (en secondes)
-* envoi sur mysql activable
-* envoi sur mqtt activable
-* envoi sur influxdb activable mais non operationnel.(pas de v2 disponible pour un rpi2, la v1.8 semble ne pas gerer les buckets)
+### Testé sur:
+  * rpi2 + module gpio [PITInfo](https://www.tindie.com/products/hallard/pitinfo/)
+  * Lecture en continu du port série avec calage sur le début d'une trame
+  * espacement des lectures paramétrables (en secondes)
 
-le fichier compose-dist.yml est un exemple de la conf pour avoir un système en fonction.
+Le fichier compose-dist.yml est un exemple de la conf pour avoir un système en fonction.
 
-## test port
+Un simple appel à son fournisseur d'énérgie permet de demander le passage en mode standard. (effectif le lendemain, le plus souvent)
+
+le blog du createur du module: https://hallard.me/pitinfov12-light/
+
+## Test du module via la port série
 
 TIC mode historique (par défaut)
 
     $ screen /dev/ttyAMA0 1200,cs7
 
 ou
-    stty </dev/ttyAMA0
+
+    $ stty </dev/ttyAMA0
 
 TIC mode standard
 
     $ screen /dev/ttyAMA0 9600,cs7,parenb,-parodd,-cstopb
 
+La doc en anglais sur le [port série du raspberry](https://www.raspberrypi.com/documentation/computers/configuration.html#configure-uarts)
 
 ## RPI2
 
@@ -35,9 +44,9 @@ TIC mode standard
 
 
 ## RPI3+
-Sur Raspberry Pi3, l’UART PL011 (full UART) du BCM2837 a été ré-alloué au WLAN/BT combo. Et le mini UART est mis à disposition des utilisateurs (sous le nom de /dev/ttyS0).
 
-Il faut donc configurer /dev/ttyS0 (à la place de /dev/ttyAMA0) et remplacer /dev/ttyAMA0 par /dev/ttyS0 à la ligne 10 de teleinfo_func.php. (voir plus bas)
+Sur Raspberry Pi3, l’UART PL011 (full UART) du BCM2837 a été ré-alloué au WLAN/BT combo. Et le mini UART est mis à disposition des utilisateurs (sous le nom de /dev/ttyS0). Ce mini uart est sensible a la charge CPU avec pour conséquence la perte des données. il faut désactiver le bluetooth pour libérer le PL011 via raspi-config.
+
 
 Pour plus d’information sur ces changements : http://spellfoundry.com/2016/05/29/configuring-gpio-serial-port-raspbian-jessie-including-pi-3/
 
@@ -75,18 +84,33 @@ PAPP     : Puissance apparente
 HHPHC    : Horaire Heures Pleines Heures Creuses
 MOTDETAT : Mot d'état du compteur
 ```
+
+## Visualisation simple
+
+* la variable HTTP_SEND permet de lancer un serveur d'affichage simple.
+* une requete SQL recueille les 100 dernières mesure d'intensité 
+* les données sont envoyés au serveur.
+* A chaque collecte, l'intensité est envoyé au serveur.
+
+<img src="newplot.png">
+
+
 ## MYSQL
 
 la table frame est crée dans la bdd donnée en conf.
-1 ligne par trame
+1 ligne par trame (38 valeurs en mode standard)
 Tous les tags sont ajoutés dans la bdd sans traitement, hormis une suppression des espaces en trop.
 
+# MQTT
+
+Envoi de la trame sur un broker mqtt.
+une variable d'environnement permet d'activer l'envoi des données au format jeedom compatible avec le plugin téléinfo.
 
 ## Influxdb v1: WIP
 
 docker compose exec influxdb bash -c influx < "create database linky; use linky; CREATE USER linky WITH PASSWORD '123456' WITH ALL PRIVILEGES;"
 
-###V1
+### V1
 curl --request GET "INFLUX_URL/api/v2/buckets" --header "Authorization: Token INFLUX_API_TOKEN"
 
 
