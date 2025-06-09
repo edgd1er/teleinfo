@@ -10,6 +10,7 @@ ENV DEBUG=false \
     HTTP_SERVER="False" \
     HTTP_IP="0.0.0.0" \
     HTTP_PORT="8080" \
+    HTTP_NBPOINTS=1000 \
     INFLUX_SEND=false \
     MYSQL_SEND=false \
     MQTT_SEND=false \
@@ -67,5 +68,5 @@ ADD --chmod=640 /src/etc/ /etc/
 
 CMD ["/usr/bin/supervisord", "-c", "/etc/supervisord.conf"]
 #ENTRYPOINT ["/app/entrypoint.sh"]
-
+WORKDIR /app
 VOLUME /config

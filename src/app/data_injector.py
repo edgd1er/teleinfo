@@ -2,32 +2,46 @@
 import logging
 import os
 import time
+from datetime import datetime
+from typing import Any
 
 import mysql.connector
 import requests
 
-
-def fetch_all_rows(subject: str = "", unit: str = "", cnx: mysql.connector = None, sql: str = ""):
-  logger.info(f'Récupération des données de {subject}')
+def fetch_all_rows(subject: str = "", unit: str = "", cnx: mysql.connector = None, sql: str = "") -> list[
+  dict[Any, Any]]:
+  logger.info(f'Récupération des données de {subject} sur {nbpoints} mesures')
   mycursor = cnx.cursor(buffered=True, dictionary=False)
-  mycursor.execute(sql)
-  data = []
+  mycursor.execute(sql,[nbpoints])
+  data = [{}]
   for (time, value) in mycursor.fetchall():
     logger.debug(f'value: {value}, time: {time}')
-    # '2015-10-20 22:24:46'
-    data.append({'tag': subject, 'value': int(value), 'ts': int(time.timestamp()), 'unit': unit})
+    if value is not None:
+      # '2015-10-20 22:24:46'
+      data.append({'tag': subject, 'value': int(value), 'ts': int(time.timestamp()), 'unit': unit})
   mycursor.close()
   data.reverse()
   return data
 
-def send_data_to_server(data: [] = None):
+def send_data_to_server(data:[]=None) -> None:
+  if data is None:
+    data = list()
+  res={}
   try:
     for d in data:
-      resp = requests.post(url, json=d)
-      logger.debug(f'resp: {resp.status_code}')
+      if len(d)>1:
+        resp = requests.post(url, json=d)
+        logger.debug(f'resp: {resp.status_code}, data: {d}')
+        res[resp.status_code]= res.get(resp.status_code,1)+1
+      else:
+        logger.error(f'invalid data: {d}')
   except Exception as e:
     logger.error(f'Exception: {e}')
 
+  tss = [ x['ts'] for x in data if x.get('ts', None) is not None ]
+  mymin = datetime.fromtimestamp(min(tss))
+  mymax = datetime.fromtimestamp(max(tss))
+  logger.info(f'mesures envoyées: {res} , de {mymin} à {mymax}')
 
 if __name__ == '__main__':
 
@@ -40,6 +54,7 @@ if __name__ == '__main__':
   host = os.getenv('HTTP_IP', '0.0.0.0')
   port = os.getenv('HTTP_PORT', 8080)
   url = f"http://{host}:{port}"
+  nbpoints = int(os.getenv('HTTP_NBPOINTS',1000))
 
   if 'TZ' in os.environ:
     time.tzset()
@@ -50,24 +65,19 @@ if __name__ == '__main__':
   logger = logging.getLogger(__name__)
   logger.setLevel(log_level)
 
-  logger.info('Démarrage de l\'injection des données pour les graphs')
+  logger.info(f'Démarrage de l\'injection des données pour les graphs ({nbpoints} mesures)')
 
   # Connexion à mysql
+  res1=None
   try:
     # Obtention du client d'API en écriture
     logger.info(f'Connexion à {mysql_username}@{mysql_host}:{mysql_port}')
     mycnx = mysql.connector.connect(host=mysql_host, user=mysql_username, password=mysql_password,
                                     database=mysql_database)
 
-    sql1 = """select f.TIME, f.SINSTS
-              from frame f
-              where date_add(now(), interval '-1' hour) < f.time
-                and DATE(f.`TIME`) <= DATE(now())
-              order by f.time desc
-              limit 1,100;"""
-    res1 = fetch_all_rows(subject="Linky - VA inst", unit="VA", cnx=mycnx, sql=sql1)
-    logger.debug(f'data#: {len(res1)}')
-    send_data_to_server(res1)
+    sql1 = "select f.TIME, f.SINSTS from frame f order by f.time desc limit 1,%s;"
+    sql2 = "select f.TIME, ceil(avg(f.SINSTS)) as `SINSTS` from frame f GROUP BY hour(f.TIME) , day(f.TIME) order by f.time desc limit 1,%s;"
+    res1 = fetch_all_rows(subject="Linky - VA inst", unit="VA", cnx=mycnx, sql=sql2)
 
   except Exception as exc:
     logger.error(f'Erreur de connexion à mysql: {exc}')
@@ -75,3 +85,6 @@ if __name__ == '__main__':
 
   finally:
     mycnx.close()
+
+  logger.debug(f'data#: {len(res1)}')
+  send_data_to_server(res1)
