@@ -148,9 +148,9 @@ def create_influxdb_client_and_thread(influxdb_url: str = "", influxdb_token: st
 
   except InfluxDBError as exc:
     logger.error(f'Erreur de connexion à InfluxDB: {exc}')
-    raise SystemExit(1)
+    return None,None
 
-    # Obtention du client d'API en écriture
+  # Obtention du client d'API en écriture
   point_settings = PointSettings()
   point_settings.add_default_tag('location', linky_location)
   write_client = influxdb_client.write_api(write_options=SYNCHRONOUS, point_settings=point_settings)
@@ -188,7 +188,7 @@ def create_mysql_client_and_thread(mysql_host: str = "", mysql_port: int = 3306,
 
   except Exception as exc:
     logger.error(f'Erreur de connexion à mysql: {exc}')
-    raise SystemExit(1)
+    return None,None
 
   # Démarrage du thread d'envoi vers mysql
   logger.info(f'Démarrage du thread d\'envoi vers mysql')
@@ -263,15 +263,21 @@ def create_mqtt_client_and_thread(mqtt_host: str = None, mqtt_port: int = 1883, 
   else:
     # Connect to the MQTT broker using a username/password
     client.username_pw_set(mqtt_username, mqtt_password)
-
-  client.connect(mqtt_host, mqtt_port)
-  client.reconnect_delay_set(min_delay=5, max_delay=5)
-
-  # Démarrage du thread d'envoi vers mysql
-  logger.info(f'Démarrage du thread d\'envoi vers mqtt #{mqtt_topic}')
-  send_mqtt_thread = Process(target=_send_data_to_mqtt,
+  try:
+    client.connect(mqtt_host, mqtt_port)
+    client.reconnect_delay_set(min_delay=5, max_delay=5)
+    # Démarrage du thread d'envoi vers mysql
+    logger.info(f'Démarrage du thread d\'envoi vers mqtt #{mqtt_topic}')
+    send_mqtt_thread = Process(target=_send_data_to_mqtt,
                              args=(client, myframe_queue, mqtt_topic, mqtt_qos, mqtt_retain), daemon=True)
-  send_mqtt_thread.start()
+    send_mqtt_thread.start()
+    client.loop_start()
+
+  except Exception as exc:
+    logger.error(f'{exc}')
+    mqtt_send_data = False
+    client = None
+    send_mqtt_thread = None
 
   return client, send_mqtt_thread
 
@@ -887,6 +893,5 @@ if __name__ == '__main__':
                                                                     mqtt_topic=mqtt_topic, mqtt_qos=mqtt_qos,
                                                                     mqtt_retain=mqtt_retain,
                                                                     myframe_queue=frame_mqtt_queue, mytls=mytls)
-    mymqtt_client.loop_start()
   # Lance la boucle infinie de lecture de la téléinfo
   linky(log_level=log_level)

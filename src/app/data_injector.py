@@ -23,7 +23,7 @@ def fetch_all_rows(subject: str = "", unit: str = "", cnx: mysql.connector = Non
   data.reverse()
   return data
 
-def send_data_to_server(data:[]=None) -> None:
+def send_data_to_server(data:list[dict[Any, Any]]=None) -> None:
   if data is None:
     data = list()
   res={}
@@ -39,9 +39,13 @@ def send_data_to_server(data:[]=None) -> None:
     logger.error(f'Exception: {e}')
 
   tss = [ x['ts'] for x in data if x.get('ts', None) is not None ]
-  mymin = datetime.fromtimestamp(min(tss))
-  mymax = datetime.fromtimestamp(max(tss))
-  logger.info(f'mesures envoyées: {res} , de {mymin} à {mymax}')
+  if len(tss)>0:
+    logger.debug(f'tss: {tss}')
+    mymin = datetime.fromtimestamp(min(tss))
+    mymax = datetime.fromtimestamp(max(tss))
+    logger.info(f'mesures envoyées: {res} , de {mymin} à {mymax}')
+  else:
+    logger.info(f'Pas de mesures dans la bdd a envoyer au serveur.')
 
 if __name__ == '__main__':
 
@@ -55,6 +59,7 @@ if __name__ == '__main__':
   port = os.getenv('HTTP_PORT', 8080)
   url = f"http://{host}:{port}"
   nbpoints = int(os.getenv('HTTP_NBPOINTS',1000))
+  mycnx= None
 
   if 'TZ' in os.environ:
     time.tzset()
@@ -81,10 +86,11 @@ if __name__ == '__main__':
 
   except Exception as exc:
     logger.error(f'Erreur de connexion à mysql: {exc}')
-    raise SystemExit(1)
+    quit(1)
 
   finally:
-    mycnx.close()
+    if mycnx is not None:
+      mycnx.close()
 
   logger.debug(f'data#: {len(res1)}')
   send_data_to_server(res1)
