@@ -2,7 +2,7 @@
 
 h=${HTTP_SERVER:-false}
 if [[ ! "nofalse0" =~ ${h,,} ]]; then
-  echo "starting web service"
+  echo "starting http_plot service"
   supervisorctl start http_plot
   #wait for service to be up
   sleep 5
