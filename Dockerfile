@@ -26,47 +26,29 @@ ENV DEBUG=false \
     MQTT_4JEEDOM=False \
     IGNORE_KEYS_CHEKSUM="[]"
 
-    # Liste des étiquettes transmises par la Téléinfo Client (TIC)
-
-    # ADCO     : Adresse du compteur
-    # OPTARIF  : Option tarifaire choisie
-    # ISOUSC   : Intensité souscrite
-    # BASE     : Index option Base
-    # HCHC     : Index Heures Creuses
-    # HCHP     : Index Heures Pleines
-    # EJPHN    : Index option EJP Heures Normales
-    # EJPHPM   : Index option EJP Heures de Pointe Mobile
-    # BBRHCJB  : Index option Tempo Heures Creuses Jours Bleus
-    # BBRHPJB  : Index option Tempo Heures Pleines Jours Bleus
-    # BBRHCJW  : Index option Tempo Heures Creuses Jours Blancs
-    # BBRHPJW  : Index option Tempo Heures Pleines Jours Blancs
-    # BBRHCJR  : Index option Tempo Heures Creuses Jours Rouges
-    # BBRHPJR  : Index option Tempo Heures Pleines Jours Rouges
-    # PEJP     : Préavis Début EJP
-    # PTEC     : Période Tarifaire en cours
-    # DEMAIN   : Couleur du lendemain
-    # IINST    : Intensité Instantanée
-    # ADPS     : Avertissement de Dépassement De Puissance Souscrite
-    # IMAX     : Intensité maximale appelée
-    # PAPP     : Puissance apparente
-    # HHPHC    : Horaire Heures Pleines Heures Creuses
-    # MOTDETAT : Mot d'état du compteur
-
-RUN apk add --no-cache bash tzdata supervisor mariadb-common mariadb-client mariadb-connector-c \
+# TODO: Setuptools<81
+RUN apk add --no-cache bash doas tzdata supervisor mariadb-common mariadb-client mariadb-connector-c \
     py3-mysqlclient python3 py3-pip gettext py3-pyserial py3-yaml py3-influxdb py3-paho-mqtt \
     && cp /etc/supervisord.conf /etc/supervisord.conf.package \
     && sed -i "s#;nodaemon=false#nodaemon=true#" /etc/supervisord.conf \
     && sed -i "s#;loglevel=info#loglevel=info#" /etc/supervisord.conf \
+    && chmod 444 /etc/supervisord.conf \
     && pip3 install --break-system-packages influxdb-client mysql-connector-python http-plot-server
 
 RUN adduser --disabled-password --gecos "" --home "$(pwd)" \
-    --ingroup "www-data" --no-create-home --uid "123456"  www-data
-RUN if [ false != ${DEBUG:-false} ]; then apk add bash vim; fi ;
+    --ingroup "www-data" --no-create-home --uid "123456"  www-data \
+    && adduser myuser -D -G wheel \
+    && addgroup myuser dialout \
+    && echo 'myuser:123' | chpasswd \
+    && echo 'permit nopass :wheel as root' > /etc/doas.d/doas.conf
+RUN if [ "false" != ${DEBUG:-"false"} ]; then apk add bash vim; fi ;
 
-ADD --chmod=750 /src/app/ /app/
-ADD --chmod=640 /src/etc/ /etc/
+ADD --chmod=755 /src/app/daily_update_graph.sh /etc/periodic/daily/
+ADD --chown=myuser:users --chmod=750 /src/app/ /app/
+ADD --chmod=644 /src/etc/ /etc/
 
-CMD ["/usr/bin/supervisord", "-c", "/etc/supervisord.conf"]
+CMD [ "/usr/bin/supervisord", "-c", "/etc/supervisord.conf"]
 #ENTRYPOINT ["/app/entrypoint.sh"]
+#USER myuser
 WORKDIR /app
 VOLUME /config

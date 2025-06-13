@@ -148,7 +148,7 @@ def create_influxdb_client_and_thread(influxdb_url: str = "", influxdb_token: st
 
   except InfluxDBError as exc:
     logger.error(f'Erreur de connexion à InfluxDB: {exc}')
-    return None,None
+    return None, None
 
   # Obtention du client d'API en écriture
   point_settings = PointSettings()
@@ -188,7 +188,7 @@ def create_mysql_client_and_thread(mysql_host: str = "", mysql_port: int = 3306,
 
   except Exception as exc:
     logger.error(f'Erreur de connexion à mysql: {exc}')
-    return None,None
+    return None, None
 
   # Démarrage du thread d'envoi vers mysql
   logger.info(f'Démarrage du thread d\'envoi vers mysql')
@@ -269,7 +269,7 @@ def create_mqtt_client_and_thread(mqtt_host: str = None, mqtt_port: int = 1883, 
     # Démarrage du thread d'envoi vers mysql
     logger.info(f'Démarrage du thread d\'envoi vers mqtt #{mqtt_topic}')
     send_mqtt_thread = Process(target=_send_data_to_mqtt,
-                             args=(client, myframe_queue, mqtt_topic, mqtt_qos, mqtt_retain), daemon=True)
+                               args=(client, myframe_queue, mqtt_topic, mqtt_qos, mqtt_retain), daemon=True)
     send_mqtt_thread.start()
     client.loop_start()
 
@@ -373,7 +373,7 @@ def _send_frames_to_influx(influxdb_frame_queue: Queue = None, influxdb_bucket=N
 
 def _send_data_to_mysql(mycnx: PooledMySQLConnection = None, mysqlframe_queue=None):
   """
-  /  enregistre la puissance instantanée en V.A et en W
+  /  enregistre les valeurs trouvées pour les 37 tags
   :return:
   """
 
@@ -382,7 +382,6 @@ def _send_data_to_mysql(mycnx: PooledMySQLConnection = None, mysqlframe_queue=No
     tcolumns = ""
     tvalues = []
     tformat = ""
-    mysql_value = ""
     if len(framemysql) > 0:
       for label, value in framemysql.items():
         tlabel = label.replace('+', 'PLUS').replace('-', 'MIN').strip()
@@ -392,22 +391,25 @@ def _send_data_to_mysql(mycnx: PooledMySQLConnection = None, mysqlframe_queue=No
         if label.lower() == 'DATE':
           mysql_value = linky_decode_date(value)
         else:
-          mysql_value = re.sub(r"\s+", " ", value)
-        if MYSQL_DB_DATATYPE[tlabel][0].lower().startswith("varchar") or MYSQL_DB_DATATYPE[tlabel][
-          0].lower() == "datetime":
+          mysql_value = value
+        if (MYSQL_DB_DATATYPE[tlabel][0].lower().startswith("varchar") or
+                MYSQL_DB_DATATYPE[tlabel][0].lower() == "datetime"):
           gui = ''
-        tvalues.append(f'{gui}{mysql_value.strip()}{gui}')
-      logger.debug(f'tcolumns: {tcolumns[:-1]}, tvalues: {tvalues}')
+        tvalues.append(f'{gui}{mysql_value}{gui}')
+      #remove last comma
+      tcolumns = tcolumns[:-1]
+      tformat = tformat[:-1]
+      logger.debug(f'tcolumns: {len(tcolumns.split(","))}, {tcolumns}, tvalues: {len(tvalues)},{tvalues}')
       try:
         insert_stmt = (
-          f'INSERT INTO frame ({tcolumns[:-1]}) '
-          f'VALUES ({tformat[:-1]})'
+          f'INSERT INTO frame ({tcolumns}) '
+          f'VALUES ({tformat})'
         )
         with mycnx.cursor() as mycursor:
           mycursor.execute(insert_stmt, tvalues)
-        mycnx.commit()
+          mycnx.commit()
       except mysql.connector.errors.ProgrammingError as exc:
-        logger.error(f'Erreur MySQL insert: {tcolumns} ## {tvalues}')
+        logger.error(f'Erreur MySQL insert: {len(tcolumns.split(","))} {tcolumns} ## {len(tformat.split(","))} {tformat} ## {len(tvalues)}{tvalues}')
         logger.error(f'Erreur MySQL insert: {exc}', exc_info=True)
       except Exception as e:
         logger.error(f'Erreur MySQL: {e}', exc_info=True)
@@ -425,14 +427,6 @@ def _send_data_to_mqtt(mymqttclient: mqtt_client = None, myframe_queue: Queue = 
                        mqtt_qos: int = 0, mqtt_retain: bool = False):
   while True:
     framemqtt = myframe_queue.get()
-
-    record = {}
-    if 'TIME' in framemqtt.keys():
-      ftime = framemqtt['TIME']
-      # logger.debug(f'frame: {framemqtt}, time: {ftime}')
-    else:
-      logger.error(f'no Time in framemqtt')
-      # logger.debug(f'frame: {framemqtt}')
 
     # la trame n'est pas vide
     if len(framemqtt) > 1:
@@ -623,9 +617,8 @@ def process_teleinfo(bytes: bytes = None):
   datasets = list(filter(lambda x: len(x) > 1, bytes.split(b'\n')))
   tagsdataset = list(map(lambda x: x.decode('ascii').strip('\r').split()[0], datasets))
 
-  logger.debug(f'tagsdataset: {tagsdataset}')
+  logger.debug(f'#datasets: {len(datasets)}, tagsdataset: {len(tagsdataset)},{tagsdataset}')
 
-  logger.debug(f'#datasets: {len(datasets)}')
   for i, dataset in enumerate(datasets):
     # un caractère "Carriage Return" CR (0x0 D) indiquant la fin du groupe d'information => suppression du cr
     str_dataset = dataset.decode('ascii').strip('\r')
@@ -642,6 +635,12 @@ def process_teleinfo(bytes: bytes = None):
     # Horodatage présent, on décale
     if len(splitted_dataset) > 3:
       idx = 2
+
+    # il manque un champs => skip
+    if idx > len(splitted_dataset):
+      logger.warning(f'{splitted_dataset[0]} est incomplet data et/ou checksum: {splitted_dataset}')
+      continue
+
     val = splitted_dataset[idx]
     # pas de donnée pour date mais un horodatage
     if key == 'DATE':
@@ -658,12 +657,8 @@ def process_teleinfo(bytes: bytes = None):
         if key == 'STGE':
           decoded_status = linky_decode_status(val)
           logger.info(f'status: {', '.join([f'{k}={v}' for k, v in decoded_status.items()])}')
-          # val = json.dumps(decoded_status)
-        if key in ['NGTF', 'MSG1', 'LTARF', 'BASE']:
-          # suppression des doubles espaces
-          val = re.sub(r"\s+", " ", val)
-        # Ajout de la valeur
-        frame[key] = val
+        # Suppression des doubles espaces et ajout de la valeur
+        frame[key] = re.sub(r"\s+", " ", val).strip()
       else:
         logger.warning(f'Somme de contrôle erronée pour {key}, checksum: {checksum} / dataset: {dataset}')
 
@@ -673,17 +668,18 @@ def process_teleinfo(bytes: bytes = None):
     logger.error(f'tags en erreurs: {errorstags}')
 
   num_keys = len(frame)
-  if 'SINSTS' in frame.keys():
+  if 'SINSTS' in tagsprocessed:
     sinsts = frame["SINSTS"]
   else:
     sinsts = "vide"
-  if 'SMAXSN' in frame.keys():
+  if 'SMAXSN' in tagsprocessed:
     smaxsn = frame["SMAXSN"]
   else:
     smaxsn = "vide"
 
   send_data_to_server(
-    {'tag': 'Linky - VA inst', 'value': int(0 if sinsts=='vide' else sinsts), 'ts': int(datetime.now().timestamp()), 'unit': 'VA'})
+    {'tag': 'Linky - VA inst', 'value': int(0 if sinsts == 'vide' else sinsts), 'ts': int(datetime.now().timestamp()),
+     'unit': 'VA'})
 
   logger.info(
     f'Trame reçue ({num_keys} étiquettes traités, sinsts: {sinsts}, SMAXSN: {smaxsn}, ({len(tagsdataset)}-{len(tagsprocessed)}={len(errorstags)}, {errorstags})')
@@ -692,7 +688,7 @@ def process_teleinfo(bytes: bytes = None):
 
   # Horodatage de la trame reçue
   frame['TIME'] = datetime.now().strftime("%Y-%m-%dT%H:%M:%SZ")
-  logger.debug(f'FRAME: {frame}')
+  logger.debug(f'FRAME: #{len(frame)}, {frame}')
 
   # Ajout à la queue d'envoi vers InfluxDB
   if influxdb_send_data:
@@ -735,7 +731,7 @@ def linky(log_level=logging.INFO):
       # not_wanted_line = ser.read_until(START_FRAME)
       # logger.debug(f'nouvelle trame trouvée, ignore: {not_wanted_line}')
       current_bytes = ser.read_until(STOP_FRAME)  # lecture jusqu a la fin de la trame
-      idx_start = current_bytes.find(START_FRAME)  # Recherche du caractère de début de trame, c'est-à-dire STX 0x02
+      idx_start = current_bytes.rfind(START_FRAME)  # Recherche du caractère de début de trame, c'est-à-dire STX 0x02
       idx_stop = current_bytes.find(STOP_FRAME,
                                     idx_start)  # Recherche du caractère de fin de trame, c'est-à-dire STX 0x03
       # logger.debug(f'current_bytes: {idx_start},{idx_start},{current_bytes}')
@@ -780,6 +776,9 @@ def linky(log_level=logging.INFO):
       logger.error('Essayez d\'utiliser /dev/ttyAMA0 plutôt que /dev/ttyS0')
     ser.close()
     raise SystemExit(1)
+
+  except IndexError as e:
+    logger.error(f'Erreur lors du traitement de la trame.')
 
   finally:
     ser.close()
