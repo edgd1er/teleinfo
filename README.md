@@ -6,6 +6,14 @@
   * envoi optionnel sur mqtt
   * envoi optionnel sur influxdb mais non operationnel.(pas de v2 disponible pour un rpi2, la v1.8 semble ne pas gerer les buckets)
 
+## Le matériel
+
+Ma solution se base sur le [PiTInfo](https://hallard.me/pitinfov12/) de [Charles Hallard](http://hallard.me), c'est une carte d'extension qui se branche sur un Raspberry Pi et qui permet de récupérer les données de la téléinformation sur son port série. Le PiTInfo est [en vente sur Tindie](https://www.tindie.com/products/Hallard/pitinfo/).
+
+Concernant le Raspberry, un [Raspberry Pi Zero](https://www.raspberrypi.org/products/raspberry-pi-zero/) suffit largement, mais n'importe quel autre modèle devrait fonctionner.
+
+NB : Ce projet fonctionne exclusivement sur un Raspberry Pi, mais si vous vous sentez l'âme d'un aventurier et que vous préférez l'utilisation d'un ESP8266, Charles Hallard (encore lui) a intégré la téléinfo à l'excellent [firmware Tasmota](https://github.com/arendst/Tasmota/blob/development/lib/lib_div/LibTeleinfo/README.md).
+
 ### Testé sur:
   * rpi2 + module gpio [PITInfo](https://www.tindie.com/products/hallard/pitinfo/)
   * Lecture en continu du port série avec calage sur le début d'une trame
@@ -59,31 +67,8 @@ Pour plus d’information sur ces changements : http://spellfoundry.com/2016/05/
 
 
 ## Liste des étiquettes transmises par la Téléinfo Client (TIC HISTORIQUE)
-```
-ADCO     : Adresse du compteur
-OPTARIF  : Option tarifaire choisie
-ISOUSC   : Intensité souscrite
-BASE     : Index option Base
-HCHC     : Index Heures Creuses
-HCHP     : Index Heures Pleines
-EJPHN    : Index option EJP Heures Normales
-EJPHPM   : Index option EJP Heures de Pointe Mobile
-BBRHCJB  : Index option Tempo Heures Creuses Jours Bleus
-BBRHPJB  : Index option Tempo Heures Pleines Jours Bleus
-BBRHCJW  : Index option Tempo Heures Creuses Jours Blancs
-BBRHPJW  : Index option Tempo Heures Pleines Jours Blancs
-BBRHCJR  : Index option Tempo Heures Creuses Jours Rouges
-BBRHPJR  : Index option Tempo Heures Pleines Jours Rouges
-PEJP     : Préavis Début EJP
-PTEC     : Période Tarifaire en cours
-DEMAIN   : Couleur du lendemain
-IINST    : Intensité Instantanée
-ADPS     : Avertissement de Dépassement De Puissance Souscrite
-IMAX     : Intensité maximale appelée
-PAPP     : Puissance apparente
-HHPHC    : Horaire Heures Pleines Heures Creuses
-MOTDETAT : Mot d'état du compteur
-```
+
+Toutes les étiquettes sont transmises par défaut, un filtre peut etre appliqué. De la même façon, 
 
 ## Visualisation simple
 
@@ -120,3 +105,7 @@ influx bucket create -n bucketname --org-id 044dc0bcf1860000 -r 10h -t yoursecre
 influx org find -t yoursecrettoken
 
 influx -host localhost -port 8086 -username 'linky' -password 'linky' -database linky
+
+### Crédits
+
+Tous les crédits vont à Charles Hallard (http://hallard.me), je n'ai fait que reprendre son travail pour l'adapter à mes besoins.

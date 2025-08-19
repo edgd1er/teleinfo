@@ -81,7 +81,7 @@ if __name__ == '__main__':
                                     database=mysql_database)
 
     sql1 = "select f.TIME, f.SINSTS from frame f order by f.time desc limit 1,%s;"
-    sql2 = "select f.TIME, ceil(avg(f.SINSTS)) as `SINSTS` from frame f GROUP BY hour(f.TIME) , day(f.TIME) order by f.time desc limit 1,%s;"
+    sql2 = "select f.TIME, ceil(avg(f.SINSTS)) as `SINSTS` from frame f GROUP BY hour(f.TIME) , day(f.TIME), month(f.TIME), year(f.TIME) order by f.time desc limit 1,%s;"
     res1 = fetch_all_rows(subject="Linky - VA inst", unit="VA", cnx=mycnx, sql=sql2)
 
   except Exception as exc:
