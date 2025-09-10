@@ -21,7 +21,7 @@ start_http_plot() {
     if [[ "true1yes" =~ ${s,,} ]]; then
       echo "Populate graph with data"
       python3 /app/data_injector.py
-      #let the injector inects before starting linky
+      # let the injector injects before starting linky
       sleep 5
     fi
     echo "end"
@@ -36,22 +36,22 @@ start_linky() {
 
 #Main
 while getopts ":rs" o; do
-    case "${o}" in
-        r) #restart
-            supervisorctl stop linky
-            stop_http_plot
-            start_http_plot
-            start_linky
-            ;;
-        s) #start
-            start_http_plot
-            start_linky
+  case "${o}" in
+  r) # restart
+    supervisorctl stop linky
+    stop_http_plot
+    start_http_plot
+    start_linky
+    ;;
+  s) # start
+    start_http_plot
+    start_linky
 
-            ;;
-        *)
-            usage
-            ;;
-    esac
+    ;;
+  *)
+    usage
+    ;;
+  esac
 done
 
 [[ -z ${*} ]] && /app/prepare.sh -s || true
