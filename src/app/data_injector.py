@@ -8,11 +8,12 @@ from typing import Any
 import mysql.connector
 import requests
 
+
 def fetch_all_rows(subject: str = "", unit: str = "", cnx: mysql.connector = None, sql: str = "") -> list[
   dict[Any, Any]]:
   logger.info(f'Récupération des données de {subject} sur {nbpoints} mesures')
   mycursor = cnx.cursor(buffered=True, dictionary=False)
-  mycursor.execute(sql,[nbpoints])
+  mycursor.execute(sql, [nbpoints])
   data = [{}]
   for (time, value) in mycursor.fetchall():
     logger.debug(f'value: {value}, time: {time}')
@@ -21,31 +22,36 @@ def fetch_all_rows(subject: str = "", unit: str = "", cnx: mysql.connector = Non
       data.append({'tag': subject, 'value': int(value), 'ts': int(time.timestamp()), 'unit': unit})
   mycursor.close()
   data.reverse()
+  logger.info(f'# of data: {len(data)}, expected: {nbpoints}')
   return data
 
-def send_data_to_server(data:list[dict[Any, Any]]=None) -> None:
+
+def send_data_to_server(data: list[dict[Any, Any]] = None) -> None:
+  # empty result dict
+  res = {}
   if data is None:
     data = list()
-  res={}
-  try:
-    for d in data:
-      if len(d)>1:
+
+  for d in data:
+    if len(d) > 1:
+      try:
         resp = requests.post(url, json=d)
         logger.debug(f'resp: {resp.status_code}, data: {d}')
-        res[resp.status_code]= res.get(resp.status_code,1)+1
-      else:
-        logger.error(f'invalid data: {d}')
-  except Exception as e:
-    logger.error(f'Exception: {e}')
+        res[resp.status_code] = res.get(resp.status_code, 1) + 1
+      except Exception as exc:
+        logger.error(f'Exception: {exc}')
+    else:
+      logger.error(f'invalid data: {d}')
 
-  tss = [ x['ts'] for x in data if x.get('ts', None) is not None ]
-  if len(tss)>0:
+  tss = [x['ts'] for x in data if x.get('ts', None) is not None]
+  if len(tss) > 0:
     logger.debug(f'tss: {tss}')
     mymin = datetime.fromtimestamp(min(tss))
     mymax = datetime.fromtimestamp(max(tss))
-    logger.info(f'mesures envoyées: {res} , de {mymin} à {mymax}')
+    logger.info(f'mesures envoyées (code, nb): {res} , de {mymin} à {mymax}')
   else:
     logger.info(f'Pas de mesures dans la bdd a envoyer au serveur.')
+
 
 if __name__ == '__main__':
 
@@ -58,8 +64,8 @@ if __name__ == '__main__':
   host = os.getenv('HTTP_IP', '0.0.0.0')
   port = os.getenv('HTTP_PORT', 8080)
   url = f"http://{host}:{port}"
-  nbpoints = int(os.getenv('HTTP_NBPOINTS',1000))
-  mycnx= None
+  nbpoints = int(os.getenv('HTTP_NBPOINTS', 1000))
+  mycnx = None
 
   if 'TZ' in os.environ:
     time.tzset()
@@ -73,7 +79,7 @@ if __name__ == '__main__':
   logger.info(f'Démarrage de l\'injection des données pour les graphs ({nbpoints} mesures)')
 
   # Connexion à mysql
-  res1=None
+  res1 = None
   try:
     # Obtention du client d'API en écriture
     logger.info(f'Connexion à {mysql_username}@{mysql_host}:{mysql_port}')
