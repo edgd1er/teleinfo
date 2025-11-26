@@ -1,6 +1,7 @@
 FROM alpine:3.22
 
 ENV DEBUG=false \
+    QUIET=false \
     TZDATA="Europe/Paris" \
     CITY="Paris" \
     LEGACY=false \

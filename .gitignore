@@ -175,3 +175,5 @@ cython_debug/
 /compose.yml
 /config/config.yml
 /.idea/
+
+config/

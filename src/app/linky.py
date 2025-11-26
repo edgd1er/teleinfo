@@ -387,14 +387,18 @@ def _send_data_to_mysql(mycnx: PooledMySQLConnection = None, mysqlframe_queue=No
         tlabel = label.replace('+', 'PLUS').replace('-', 'MIN').strip()
         tcolumns += f'{tlabel},'
         tformat += "%s,"
+        logger.debug(f'mysql items: {label}/{tlabel}, {value}')
         gui = ""
-        if label.lower() == 'DATE':
-          mysql_value = linky_decode_date(value)
-        else:
-          mysql_value = value
+        mysql_value = value
+        #do not change value but save for time field.
+        if label.lower() == 'date':
+          save_the_date = linky_decode_date(value)
         if (MYSQL_DB_DATATYPE[tlabel][0].lower().startswith("varchar") or
-                MYSQL_DB_DATATYPE[tlabel][0].lower() == "datetime"):
+                MYSQL_DB_DATATYPE[tlabel][0].lower() == "date"):
           gui = ''
+        #transform linky date field to dateime
+        if  label.lower() == "time":
+          mysql_value = save_the_date
         tvalues.append(f'{gui}{mysql_value}{gui}')
       #remove last comma
       tcolumns = tcolumns[:-1]
@@ -412,6 +416,7 @@ def _send_data_to_mysql(mycnx: PooledMySQLConnection = None, mysqlframe_queue=No
         logger.error(f'Erreur MySQL insert: {len(tcolumns.split(","))} {tcolumns} ## {len(tformat.split(","))} {tformat} ## {len(tvalues)}{tvalues}')
         logger.error(f'Erreur MySQL insert: {exc}', exc_info=True)
       except Exception as e:
+        logger.error(f'Erreur MySQL insert: {len(tcolumns.split(","))} {tcolumns} ## {len(tformat.split(","))} {tformat} ## {len(tvalues)}{tvalues}')
         logger.error(f'Erreur MySQL: {e}', exc_info=True)
 
 
@@ -444,6 +449,7 @@ def _send_data_to_mqtt(mymqttclient: mqtt_client = None, myframe_queue: Queue = 
 #####################################################################################################################
 def linky_decode_date(value: str = ""):
   # E250603110050
+  logger.debug(f'value: {value}')
   if len(value) < len("E250603110050"):
     logger.error(f'donnée incorrecte: {value} pas decodable SYYMMDDHHSS')
     return datetime.now()
@@ -460,11 +466,11 @@ def linky_decode_date(value: str = ""):
     logger.debug(f'value:{value} => {e}')
     dt = datetime.now()
 
-  logger.debug(f'val: {value}, s: {saison}, a:{annee}, m:{mois}, j:{jour}, h:{heure}, m:{minute}, s:{sec}, dt: {dt}')
+  logger.debug(f'val: {value}, s: {saison}, a:{annee}, m:{mois}, j:{jour}, h:{heure}, m:{minute}, s:{sec}, dt: {dt}/{dt.strftime(format="%Y-%m-%d %H:%M:%S")}')
 
   if saison in ['e', 'h', ' ']:
     logger.error(f'Compteur en mode dégradé pour l\'heure: {saison}')
-  return datetime(year=annee, month=mois, day=jour, hour=heure, minute=minute, second=sec)
+  return dt.strftime(format="%Y-%m-%d %H:%M:%S")
 
 
 def linky_decode_status(hex_str: str = ""):
@@ -811,10 +817,11 @@ if __name__ == '__main__':
 
   # Configuration du logger en mode debug
   debug = os.getenv('DEBUG', False)
+  quiet = os.getenv('QUIET', False)
   log_level = logging.INFO
-  if args.verbose or debug:
+  if args.verbose or debug.lower() in  ['true', '1', 't', 'y', 'yes'] :
     log_level = logging.DEBUG
-  if args.quiet:
+  if args.quiet or quiet.lower() in  ['true', '1', 't', 'y', 'yes'] :
     log_level = logging.ERROR
   # logging.getLogger().setLevel(log_level)
   logger.setLevel(log_level)
