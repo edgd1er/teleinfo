@@ -8,10 +8,12 @@ ENV DEBUG=false \
     KEYS="ISOUSC BASE IINST" \
     PORT='ttyserial0' \
     SLEEP_INTERVAL=60 \
+    SINSTS_PERCENT_CHANGE=.5 \
     HTTP_SERVER="False" \
     HTTP_IP="0.0.0.0" \
     HTTP_PORT="8080" \
     HTTP_NBPOINTS=500 \
+    FILE_SEND=false \
     INFLUX_SEND=false \
     MYSQL_SEND=false \
     MQTT_SEND=false \
@@ -44,8 +46,8 @@ RUN adduser --disabled-password --gecos "" --home "$(pwd)" \
     && echo 'permit nopass :wheel as root' > /etc/doas.d/doas.conf
 RUN if [ "false" != ${DEBUG:-"false"} ]; then apk add bash vim; fi ;
 
-ADD --chmod=755 /src/app/daily_update_graph.sh /etc/periodic/daily/
-ADD --chown=myuser:users --chmod=750 /src/app/ /app/
+ADD --chmod=755 /src/linky/daily_update_graph.sh /etc/periodic/daily/
+ADD --chown=myuser:users --chmod=750 /src/linky/ /app/
 ADD --chmod=644 /src/etc/ /etc/
 
 CMD [ "/usr/bin/supervisord", "-c", "/etc/supervisord.conf"]

@@ -12,6 +12,7 @@
 # * Tester plusieurs scénarios d'erreurs InfluxDB (iptables sur serveur, arrêt du serveur)
 
 import argparse
+import io
 import json
 import logging
 import os
@@ -21,8 +22,10 @@ import signal
 import ssl
 import termios
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 from multiprocessing import Process, Queue
+from pathlib import Path
+from zoneinfo import ZoneInfo
 
 import mysql.connector
 import requests
@@ -37,16 +40,25 @@ from urllib3 import Retry
 from urllib3.exceptions import HTTPError
 
 logger = logging.getLogger(__name__)
-LDIR = os.path.dirname(os.path.realpath(__file__))
+LDIR = str(Path(__file__).resolve().parent)
 DEFAULT_KEYS = ('ISOUSC', 'BASE', 'IINST',)
 DEFAULT_CHECKSUM_METHOD = 1
 DEFAULT_INTERVAL = 60
+DATAFILE = Path('/config') / Path(__file__).with_suffix('.csv').name
 
 START_FRAME = b'\x02'  # STX, Start of Text
 STOP_FRAME = b'\x03'  # ETX, End of Text
 
+tz = ZoneInfo(os.getenv("TZ", "UTC"))
+
 if 'TZ' in os.environ:
   time.tzset()
+
+last_emit_time = datetime.now(tz=tz) - timedelta(hours=1)
+last_sinsts = 1
+last_stge = 0
+
+SINSTS_PERCENT_CHANGE = .5
 
 MYSQL_DB_DATATYPE = {"ADSC": ["bigint unsigned", 0], "VTIC": ["tinyint  UNSIGNED", 2], "DATE": ["VARCHAR(13)", ""],
                      "NGTF": ["VARCHAR(16)", ""],
@@ -166,6 +178,22 @@ def create_influxdb_client_and_thread(influxdb_url: str = "", influxdb_token: st
   return write_client, send_influx_thread
 
 
+def create_file_client_and_thread(datafile, myframe_queue) -> tuple[io.TextIOWrapper, Process]:
+  try:
+    logger.debug(f'Creation du fichier {datafile} et du thread file')
+    fh = open(datafile, 'a+')
+  except Exception as exc:
+    logger.error(f'Erreur de creation/ouverture de {datafile}: {exc}')
+    return None, None
+
+  send_file_thread = Process(target=_send_frames_to_file, args=(myframe_queue, fh,),
+                             daemon=True)
+  logger.info(f'Démarrage du thread send_file_thread sur le fichier {datafile}')
+  send_file_thread.start()
+
+  return fh, send_file_thread
+
+
 #################################################################################################
 def create_mysql_client_and_thread(mysql_host: str = "", mysql_port: int = 3306, mysql_username: str = "",
                                    mysql_password: str = "", mysql_database: str = "",
@@ -192,7 +220,7 @@ def create_mysql_client_and_thread(mysql_host: str = "", mysql_port: int = 3306,
 
   # Démarrage du thread d'envoi vers mysql
   logger.info(f'Démarrage du thread d\'envoi vers mysql')
-  send_mysql_thread = Process(target=_send_data_to_mysql, args=(mycnx, myframe_queue,), daemon=True)
+  send_mysql_thread = Process(target=_send_frames_to_mysql, args=(mycnx, myframe_queue,), daemon=True)
   send_mysql_thread.start()
   return mycnx, send_mysql_thread
 
@@ -268,7 +296,7 @@ def create_mqtt_client_and_thread(mqtt_host: str = None, mqtt_port: int = 1883, 
     client.reconnect_delay_set(min_delay=5, max_delay=5)
     # Démarrage du thread d'envoi vers mysql
     logger.info(f'Démarrage du thread d\'envoi vers mqtt #{mqtt_topic}')
-    send_mqtt_thread = Process(target=_send_data_to_mqtt,
+    send_mqtt_thread = Process(target=_send_frames_to_mqtt,
                                args=(client, myframe_queue, mqtt_topic, mqtt_qos, mqtt_retain), daemon=True)
     send_mqtt_thread.start()
     client.loop_start()
@@ -305,6 +333,11 @@ def _handler(signum, frame):
     frame_mqtt_queue.close()
     send_mqtt_thread.join(5)
 
+  if file_send_data:
+    file_client.close()
+    frame_file_queue.close()
+    send_file_thread.join(5)
+
   raise SystemExit(0)
 
 
@@ -313,6 +346,31 @@ def _checksum(data, checksum):
   s1 = sum([ord(c) for c in data])
   s2 = (s1 & 0x3F) + 0x20
   return (checksum == chr(s2))
+
+
+def _send_frames_to_file(file_frame_queue: Queue, file_client: io.TextIOWrapper = None):
+  logger.debug(f'Sending {file_frame_queue.qsize()} frame to file')
+  if file_client is None:
+    logger.error('Write client is None')
+
+  while True:
+    framefile = file_frame_queue.get()
+    fileline = ""
+    save_the_date = ""
+    if len(framefile) > 0:
+      for label, value in framefile.items():
+        fileline += f'{value};'
+        # do not change value but save for time field.
+        if label.lower() == 'date':
+          save_the_date = linky_decode_date(value)
+      fileline += "\n"
+      logger.debug(f'fileline: {len(fileline.split(";"))}, {fileline}')
+      try:
+        file_client.writelines(fileline)
+        file_client.flush()
+      except Exception as e:
+        logger.error(f'Erreur File: {len(fileline.split(";"))} ## {fileline}')
+        logger.error(f'Erreur File: {e}', exc_info=True)
 
 
 def _send_frames_to_influx(influxdb_frame_queue: Queue = None, influxdb_bucket=None, write_client=None):
@@ -327,11 +385,12 @@ def _send_frames_to_influx(influxdb_frame_queue: Queue = None, influxdb_bucket=N
   while True and influxdb_send_data:
     # Récupère une trame dans la file d'attente
     frameinflux = influxdb_frame_queue.get()
+    logger.info(f'infludb queue size: {influxdb_frame_queue.qsize()}')
     if 'TIME' in frameinflux.keys():
       ftime = frameinflux.pop('TIME')
       logger.debug(f'frame: {frameinflux}, time: {ftime}')
     else:
-      logger.error(f'no Time in frameinflux')
+      logger.error('no Time in frameinflux')
       logger.debug(f'frame: {frameinflux}')
 
     record = []
@@ -340,7 +399,7 @@ def _send_frames_to_influx(influxdb_frame_queue: Queue = None, influxdb_bucket=N
       record.append(point)
 
     # Envoie vers InfluxDB et ré-essaie en boucle tant que cela ne fonctionne pas
-    logger.info(f'Ecriture dans InfluxDB')
+    logger.info('Ecriture dans InfluxDB')
     written = False
     x = 0
     while not written:
@@ -355,9 +414,9 @@ def _send_frames_to_influx(influxdb_frame_queue: Queue = None, influxdb_bucket=N
         else:
           logger.error(f'Erreur lors de l\'écriture dans {influxdb_bucket}')
       except InfluxDBError as exc:
-        logger.error(f'Erreur InfluxDB', exc_info=True)
+        logger.error(f'Erreur InfluxDB: {exc}', exc_info=True)
       except (OSError, HTTPError) as exc:
-        logger.error(f'Serveur injoignable', exc_info=True)
+        logger.error(f'Serveur injoignable: {exc}', exc_info=True)
       finally:
         if not written:
           # Attends de plus en plus longtemps
@@ -371,14 +430,15 @@ def _send_frames_to_influx(influxdb_frame_queue: Queue = None, influxdb_bucket=N
     # influxdb_frame_queue.task_done()
 
 
-def _send_data_to_mysql(mycnx: PooledMySQLConnection = None, mysqlframe_queue=None):
+def _send_frames_to_mysql(mycnx: PooledMySQLConnection = None, mysqlframe_queue: Queue = None):
   """
   /  enregistre les valeurs trouvées pour les 37 tags
   :return:
   """
 
-  while True:
-    framemysql = mysqlframe_queue.get()
+  while True and mysql_send_data:
+    framemysql = mysqlframe_queue.get(block=True)
+    logger.info(f'mysql queue size: {mysqlframe_queue.qsize()}, frame: {len(framemysql)}')
     tcolumns = ""
     tvalues = []
     tformat = ""
@@ -390,17 +450,17 @@ def _send_data_to_mysql(mycnx: PooledMySQLConnection = None, mysqlframe_queue=No
         logger.debug(f'mysql items: {label}/{tlabel}, {value}')
         gui = ""
         mysql_value = value
-        #do not change value but save for time field.
+        # do not change value but save for time field.
         if label.lower() == 'date':
           save_the_date = linky_decode_date(value)
         if (MYSQL_DB_DATATYPE[tlabel][0].lower().startswith("varchar") or
                 MYSQL_DB_DATATYPE[tlabel][0].lower() == "date"):
           gui = ''
-        #transform linky date field to dateime
-        if  label.lower() == "time":
+        # transform linky date field to dateime
+        if label.lower() == "time":
           mysql_value = save_the_date
         tvalues.append(f'{gui}{mysql_value}{gui}')
-      #remove last comma
+      # remove last comma
       tcolumns = tcolumns[:-1]
       tformat = tformat[:-1]
       logger.debug(f'tcolumns: {len(tcolumns.split(","))}, {tcolumns}, tvalues: {len(tvalues)},{tvalues}')
@@ -413,10 +473,12 @@ def _send_data_to_mysql(mycnx: PooledMySQLConnection = None, mysqlframe_queue=No
           mycursor.execute(insert_stmt, tvalues)
           mycnx.commit()
       except mysql.connector.errors.ProgrammingError as exc:
-        logger.error(f'Erreur MySQL insert: {len(tcolumns.split(","))} {tcolumns} ## {len(tformat.split(","))} {tformat} ## {len(tvalues)}{tvalues}')
+        logger.error(
+          f'Erreur MySQL insert: {len(tcolumns.split(","))} {tcolumns} ## {len(tformat.split(","))} {tformat} ## {len(tvalues)}{tvalues}')
         logger.error(f'Erreur MySQL insert: {exc}', exc_info=True)
       except Exception as e:
-        logger.error(f'Erreur MySQL insert: {len(tcolumns.split(","))} {tcolumns} ## {len(tformat.split(","))} {tformat} ## {len(tvalues)}{tvalues}')
+        logger.error(
+          f'Erreur MySQL insert: {len(tcolumns.split(","))} {tcolumns} ## {len(tformat.split(","))} {tformat} ## {len(tvalues)}{tvalues}')
         logger.error(f'Erreur MySQL: {e}', exc_info=True)
 
 
@@ -428,11 +490,11 @@ def format_payload_for_teleinfo_jeedom(frame: {} = {}) -> str:
   return json.dumps(output_string)
 
 
-def _send_data_to_mqtt(mymqttclient: mqtt_client = None, myframe_queue: Queue = None, mqtt_topic: str = "linky",
-                       mqtt_qos: int = 0, mqtt_retain: bool = False):
-  while True:
+def _send_frames_to_mqtt(mymqttclient: mqtt_client = None, myframe_queue: Queue = None, mqtt_topic: str = "linky",
+                         mqtt_qos: int = 0, mqtt_retain: bool = False):
+  while True and mqtt_send_data:
     framemqtt = myframe_queue.get()
-
+    logger.info(f'mqtt queue size: {myframe_queue.qsize()}')
     # la trame n'est pas vide
     if len(framemqtt) > 1:
       # mise au format pour jeedom
@@ -466,7 +528,8 @@ def linky_decode_date(value: str = ""):
     logger.debug(f'value:{value} => {e}')
     dt = datetime.now()
 
-  logger.debug(f'val: {value}, s: {saison}, a:{annee}, m:{mois}, j:{jour}, h:{heure}, m:{minute}, s:{sec}, dt: {dt}/{dt.strftime(format="%Y-%m-%d %H:%M:%S")}')
+  logger.debug(
+    f'val: {value}, s: {saison}, a:{annee}, m:{mois}, j:{jour}, h:{heure}, m:{minute}, s:{sec}, dt: {dt}/{dt.strftime(format="%Y-%m-%d %H:%M:%S")}')
 
   if saison in ['e', 'h', ' ']:
     logger.error(f'Compteur en mode dégradé pour l\'heure: {saison}')
@@ -601,6 +664,9 @@ def linky_decode_status(hex_str: str = ""):
     3: "PM3 en cours"
   }
   resultats["Pointe mobile en cours"] = pm_mapping.get(pm_cours, "inconnu")
+
+  if (contact_sec != 1) or (depassement != 0) or (organe_coupure != 0):
+    logger.warning(f'messages: {resultats}')
   return resultats
 
 
@@ -628,7 +694,7 @@ def process_teleinfo(bytes: bytes = None):
   for i, dataset in enumerate(datasets):
     # un caractère "Carriage Return" CR (0x0 D) indiquant la fin du groupe d'information => suppression du cr
     str_dataset = dataset.decode('ascii').strip('\r')
-    logger.debug(f'datasets[{i}]: {str_dataset}')
+    # logger.debug(f'datasets[{i}]: {str_dataset}')
 
     # Identification du séparateur en vigueur (espace ou tabulation) #bug in PFJOUR+1
     separator = str_dataset[-2] if str_dataset[-2] in ['\t', ' '] else '\t'
@@ -651,6 +717,8 @@ def process_teleinfo(bytes: bytes = None):
     # pas de donnée pour date mais un horodatage
     if key == 'DATE':
       val = splitted_dataset[idx - 1]
+      if datetime.now() - datetime.strptime(linky_decode_date(val), "%Y-%m-%d %H:%M:%S") > timedelta(minutes=5):
+        logger.error(f'Date {val} is much earlier that {datetime.now()}')
 
     checksum = splitted_dataset[idx + 1][0]
 
@@ -662,7 +730,7 @@ def process_teleinfo(bytes: bytes = None):
       if key in linky_ignore_checksum_for_keys or _checksum(str_dataset[0:-1], checksum):
         if key == 'STGE':
           decoded_status = linky_decode_status(val)
-          logger.info(f'status: {', '.join([f'{k}={v}' for k, v in decoded_status.items()])}')
+          logger.debug(f'status: {', '.join([f'{k}={v}' for k, v in decoded_status.items()])}')
         # Suppression des doubles espaces et ajout de la valeur
         frame[key] = re.sub(r"\s+", " ", val).strip()
       else:
@@ -683,18 +751,20 @@ def process_teleinfo(bytes: bytes = None):
   else:
     smaxsn = "vide"
 
-  send_data_to_server(
-    {'tag': 'Linky - VA inst', 'value': int(0 if sinsts == 'vide' else sinsts), 'ts': int(datetime.now().timestamp()),
-     'unit': 'VA'})
-
   logger.info(
     f'Trame reçue ({num_keys} étiquettes traités, sinsts: {sinsts}, SMAXSN: {smaxsn}, ({len(tagsdataset)}-{len(tagsprocessed)}={len(errorstags)}, {errorstags})')
-  # for i,(k,v) in enumerate(frame.items()):
-  #  logger.debug(f'frame[{i}]: {k}={v}')
 
   # Horodatage de la trame reçue
   frame['TIME'] = datetime.now().strftime("%Y-%m-%dT%H:%M:%SZ")
   logger.debug(f'FRAME: #{len(frame)}, {frame}')
+
+  if should_emit(tag=frame, SINSTS_PERCENT_CHANGE=SINSTS_PERCENT_CHANGE) is False:
+    return
+
+  # send to http plot
+  send_data_to_server(
+    {'tag': 'Linky - VA inst', 'value': int(0 if sinsts == 'vide' else sinsts), 'ts': int(datetime.now().timestamp()),
+     'unit': 'VA'})
 
   # Ajout à la queue d'envoi vers InfluxDB
   if influxdb_send_data:
@@ -713,6 +783,11 @@ def process_teleinfo(bytes: bytes = None):
     frame_mqtt_queue.put(frame)
     if frame_mqtt_queue.qsize() > 1:
       logger.warning(f'mqtt queue: {frame_mqtt_queue.qsize()}')
+
+  if file_send_data:
+    frame_file_queue.put(frame)
+    if frame_file_queue.qsize() > 1:
+      logger.warning(f'file queue: {frame_file_queue.qsize()}')
 
 
 def linky(log_level=logging.INFO):
@@ -734,8 +809,6 @@ def linky(log_level=logging.INFO):
     logger.info('Attente d\'une première trame...')
     while True:
       error = 0
-      # not_wanted_line = ser.read_until(START_FRAME)
-      # logger.debug(f'nouvelle trame trouvée, ignore: {not_wanted_line}')
       current_bytes = ser.read_until(STOP_FRAME)  # lecture jusqu a la fin de la trame
       idx_start = current_bytes.rfind(START_FRAME)  # Recherche du caractère de début de trame, c'est-à-dire STX 0x02
       idx_stop = current_bytes.find(STOP_FRAME,
@@ -760,7 +833,7 @@ def linky(log_level=logging.INFO):
       if error == 0:
         # remove terminal \x03
         process_teleinfo(wanted_bytes_line[0:-1])
-        time.sleep(linky_sleep_interval)
+        # time.sleep(linky_sleep_interval)
   #      else:
   #        logger.error(f'Cannot process: {wanted_bytes_line}')
 
@@ -788,6 +861,51 @@ def linky(log_level=logging.INFO):
 
   finally:
     ser.close()
+
+
+def should_emit(tag: dict, SINSTS_PERCENT_CHANGE) -> bool:
+  """
+  return true if last frame was sent one minute ago or sinsts change more than x%, or status changed
+  :param tag:
+  :rtype: bool
+  """
+  global last_emit_time, last_sinsts, last_stge
+
+  # Conversion du champ TIME en datetime
+  current_time = datetime.fromisoformat(tag["TIME"].replace("Z", "+00:00"))
+  current_sinsts = int(tag["SINSTS"])
+  current_stge = tag["STGE"]
+
+  logger.debug(
+    f'this frame: {current_time}/{(current_time - last_emit_time).seconds}, {current_sinsts}/{abs(current_sinsts - last_sinsts) / last_sinsts}, {current_stge}/{current_stge == last_stge}')
+
+  # Condition 1 : au moins une minute écoulée
+  if current_time - last_emit_time >= timedelta(minutes=1):
+    logger.debug(f'allowing frame, Last emit time: {last_emit_time}, current_time: {current_time}')
+    last_emit_time = current_time
+    last_sinsts = current_sinsts
+    last_stge = current_stge
+    return True
+
+  # Condition 2 : variation de SINSTS > 50 %
+  if abs(current_sinsts - last_sinsts) / max(1, last_sinsts) > SINSTS_PERCENT_CHANGE:
+    last_emit_time = current_time
+    last_sinsts = current_sinsts
+    last_stge = current_stge
+    logger.debug(f'allowing frame, Last sinsts: {last_sinsts}, current sinsts: {current_sinsts}')
+    return True
+
+  # Condition 3 : STGE a changé
+  if current_stge != last_stge:
+    logger.debug(f'STGE changed: {last_stge} != {current_stge}')
+    last_emit_time = current_time
+    last_sinsts = current_sinsts
+    last_stge = current_stge
+    return True
+
+  logger.debug(
+    f'Discarding this frame: {current_time}/{(current_time - last_emit_time).seconds}, {current_sinsts}/{abs(current_sinsts - last_sinsts) / last_sinsts}, {current_stge}/{current_stge == last_stge}')
+  return False
 
 
 if __name__ == '__main__':
@@ -819,9 +937,9 @@ if __name__ == '__main__':
   debug = os.getenv('DEBUG', False)
   quiet = os.getenv('QUIET', False)
   log_level = logging.INFO
-  if args.verbose or debug.lower() in  ['true', '1', 't', 'y', 'yes'] :
+  if args.verbose or debug.lower() in ['true', '1', 't', 'y', 'yes']:
     log_level = logging.DEBUG
-  if args.quiet or quiet.lower() in  ['true', '1', 't', 'y', 'yes'] :
+  if args.quiet or quiet.lower() in ['true', '1', 't', 'y', 'yes']:
     log_level = logging.ERROR
   # logging.getLogger().setLevel(log_level)
   logger.setLevel(log_level)
@@ -833,9 +951,15 @@ if __name__ == '__main__':
   linky_keys = list(map(lambda x: x.strip(), os.getenv('KEYS', "ISOUSC BASE IINST").split(',')))
   # linky_keys = [ x.strip() for x in os.getenv('KEYS', "ISOUSC BASE IINST").split(',') ]
   linky_sleep_interval = int(os.getenv('SLEEP_INTERVAL', DEFAULT_INTERVAL))
-
   raspberry_stty_port = os.getenv('PORT', 'ttyS0').replace("/dev/", "")
-
+  # define SINSTS_PERCENT_CHANGE from env
+  try:
+    SINSTS_PERCENT_CHANGE = float(os.getenv('SINSTS_PERCENT_CHANGE', .5))
+  except ValueError as e:
+    logger.error(f'SINSTS_PERCENT_CHANGE: {e}, defaulting to .5')
+    SINSTS_PERCENT_CHANGE = .5
+  SINSTS_PERCENT_CHANGE = SINSTS_PERCENT_CHANGE if SINSTS_PERCENT_CHANGE > 0 else 0
+  SINSTS_PERCENT_CHANGE = SINSTS_PERCENT_CHANGE if SINSTS_PERCENT_CHANGE <= 1 else 1
   # http_server
   host = os.getenv('HTTP_IP', '0.0.0.0')
   port = os.getenv('HTTP_PORT', 8080)
@@ -843,12 +967,19 @@ if __name__ == '__main__':
 
   # exporters
   influxdb_send_data = os.getenv('INFLUX_SEND', 'false').lower() in ('true', '1', 't')
-  mysql_send_data = os.getenv('MYSQL_SEND', 'false') in ('true', '1', 't')
-  mqtt_send_data = os.getenv('MQTT_SEND', 'False') in ('true', '1', 't')
-  mqtt_teleinfo4jeedom = os.getenv('MQTT_4JEEDOM', 'False') in ('true', '1', 't')
+  mysql_send_data = os.getenv('MYSQL_SEND', 'false').lower() in ('true', '1', 't')
+  mqtt_send_data = os.getenv('MQTT_SEND', 'false').lower() in ('true', '1', 't')
+  file_send_data = os.getenv('FILE_SEND', 'false').lower() in ('true', '1', 't')
+  mqtt_teleinfo4jeedom = os.getenv('MQTT_4JEEDOM', 'false').lower() in ('true', '1', 't')
 
   # prepare needed informations
   write_client = None
+  # when starting, need
+
+  if file_send_data:
+    frame_file_queue = Queue()
+    file_client, send_file_thread = create_file_client_and_thread(datafile=DATAFILE, myframe_queue=frame_file_queue)
+
   if influxdb_send_data:
     logger.debug(f'influxdb_send_data: {influxdb_send_data}, {type(influxdb_send_data)}')
     influxdb_url = os.getenv('INFLUX_URL', '')

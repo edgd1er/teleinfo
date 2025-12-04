@@ -1,0 +1,46 @@
+[project]
+name = "linky_web_file_mqtt_mysql_influxdb"
+version = "0.0.1"
+authors = [
+    { name="Edgd1er", email="edgd1er@hotmail.com" },
+]
+description = "Read frames from /dev/ttyS0 connected to linky, send to file, mqtt, mysql and influxdb, display SINSTS plot"
+readme = "README.md"
+requires-python = ">=3.9"
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Operating System :: OS Independent",
+]
+
+license = {text = "GNU General Public License v3.0" }
+#license = {file = ["LICEN[CS]E"] }
+#license = "GNU General Public License v3.0"
+#license-files = ["LICEN[CS]E"]
+
+dependencies = [
+    "influxdb-client",
+    "mysql-connector-python",
+    "http-plot-server"]
+
+[project.optional-dependencies]
+dev = ["black", "isort"]
+
+[project.urls]
+Homepage = "https://github.com/edgd1er/teleinfo"
+Issues = "https://github.com/edgd1er/teleinfo/issues"
+
+[build-system]
+requires = ["setuptools >= 77.0.3"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["."]
+
+[project.scripts]
+linky = "linky.__main__:main"
+
+[tool.black]
+line-length = 88
+
+[tool.isort]
+profile = "black"
