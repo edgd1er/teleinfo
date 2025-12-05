@@ -14,6 +14,8 @@ Concernant le Raspberry, un [Raspberry Pi Zero](https://www.raspberrypi.org/prod
 
 NB : Ce projet fonctionne exclusivement sur un Raspberry Pi, mais si vous vous sentez l'âme d'un aventurier et que vous préférez l'utilisation d'un ESP8266, Charles Hallard (encore lui) a intégré la téléinfo à l'excellent [firmware Tasmota](https://github.com/arendst/Tasmota/blob/development/lib/lib_div/LibTeleinfo/README.md).
 
+Linky envoie plus ou moins une frame toutes les trois secondes, ces frames doivent etre consommées pour ne pas s'empiler. Un module de filtre est en place pour laisser passer une frame toutes les X (SLEEP INTERVAL) secondes ou en cas de changement de l'intensité (SINSTS_PERCENT_CHANGE). 
+
 ### Testé sur:
   * rpi2 + module gpio [PITInfo](https://www.tindie.com/products/hallard/pitinfo/)
   * Lecture en continu du port série avec calage sur le début d'une trame

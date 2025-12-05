@@ -758,7 +758,7 @@ def process_teleinfo(bytes: bytes = None):
   frame['TIME'] = datetime.now().strftime("%Y-%m-%dT%H:%M:%SZ")
   logger.debug(f'FRAME: #{len(frame)}, {frame}')
 
-  if should_emit(tag=frame, SINSTS_PERCENT_CHANGE=SINSTS_PERCENT_CHANGE) is False:
+  if should_emit(tag=frame, sinsts_percent_change=SINSTS_PERCENT_CHANGE, sleep_interval=linky_sleep_interval) is False:
     return
 
   # send to http plot
@@ -863,7 +863,7 @@ def linky(log_level=logging.INFO):
     ser.close()
 
 
-def should_emit(tag: dict, SINSTS_PERCENT_CHANGE) -> bool:
+def should_emit(tag: dict, sinsts_percent_change:float=1, sleep_interval:int=60) -> bool:
   """
   return true if last frame was sent one minute ago or sinsts change more than x%, or status changed
   :param tag:
@@ -880,7 +880,7 @@ def should_emit(tag: dict, SINSTS_PERCENT_CHANGE) -> bool:
     f'this frame: {current_time}/{(current_time - last_emit_time).seconds}, {current_sinsts}/{abs(current_sinsts - last_sinsts) / last_sinsts}, {current_stge}/{current_stge == last_stge}')
 
   # Condition 1 : au moins une minute écoulée
-  if current_time - last_emit_time >= timedelta(minutes=1):
+  if current_time - last_emit_time >= timedelta(seconds=sleep_interval):
     logger.debug(f'allowing frame, Last emit time: {last_emit_time}, current_time: {current_time}')
     last_emit_time = current_time
     last_sinsts = current_sinsts
@@ -888,7 +888,7 @@ def should_emit(tag: dict, SINSTS_PERCENT_CHANGE) -> bool:
     return True
 
   # Condition 2 : variation de SINSTS > 50 %
-  if abs(current_sinsts - last_sinsts) / max(1, last_sinsts) > SINSTS_PERCENT_CHANGE:
+  if abs(current_sinsts - last_sinsts) / max(1, last_sinsts) > sinsts_percent_change:
     last_emit_time = current_time
     last_sinsts = current_sinsts
     last_stge = current_stge
@@ -977,6 +977,7 @@ if __name__ == '__main__':
   # when starting, need
 
   if file_send_data:
+    logger.info(f'File writing every {linky_sleep_interval} seconds or if {SINSTS_PERCENT_CHANGE} percent change in intensity')
     frame_file_queue = Queue()
     file_client, send_file_thread = create_file_client_and_thread(datafile=DATAFILE, myframe_queue=frame_file_queue)
 
