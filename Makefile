@@ -7,8 +7,11 @@ help: ## This help.
 
 build: ## build teleinfo
 		@echo "build teleinfo"
+		docker compose build teleinfo
+		@echo "stopping teleinfo"
 		docker compose down -v teleinfo
-		docker compose up -d --build teleinfo
+		@echo "starting teleinfo"
+		docker compose up -d teleinfo
 
 db: ## start mysql + mqtt
 		@echo "start mysql + mqtt"

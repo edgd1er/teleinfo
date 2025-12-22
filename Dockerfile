@@ -1,4 +1,4 @@
-FROM alpine:3.22
+FROM alpine:3.23
 
 ENV DEBUG=false \
     QUIET=false \
@@ -16,6 +16,7 @@ ENV DEBUG=false \
     FILE_SEND=false \
     INFLUX_SEND=false \
     MYSQL_SEND=false \
+    MYSQL_POOL_SIZE=5 \
     MQTT_SEND=false \
     MQTT_TOPIC="linky" \
     MQTT_QOS=0 \

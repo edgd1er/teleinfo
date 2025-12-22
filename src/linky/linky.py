@@ -25,6 +25,7 @@ import time
 from datetime import datetime, timedelta
 from multiprocessing import Process, Queue
 from pathlib import Path
+from typing import Any
 from zoneinfo import ZoneInfo
 
 import mysql.connector
@@ -34,7 +35,6 @@ from influxdb_client import InfluxDBClient, Point, BucketRetentionRules
 from influxdb_client.client.exceptions import InfluxDBError
 from influxdb_client.client.write_api import SYNCHRONOUS, PointSettings
 from influxdb_client.rest import ApiException
-from mysql.connector.pooling import PooledMySQLConnection
 from paho.mqtt import client as mqtt_client
 from urllib3 import Retry
 from urllib3.exceptions import HTTPError
@@ -116,6 +116,10 @@ MYSQL_DB_DATATYPE = {"ADSC": ["bigint unsigned", 0], "VTIC": ["tinyint  UNSIGNED
 # send data to http-server-plot
 
 def send_data_to_server(data: {} = None):
+  """
+  collected data are sent to http server for plotting.
+  :type data: {}
+  """
   if os.getenv('HTTP_SERVER', 'false').lower() in ('true', 't', 'y', '1'):
     try:
       resp = requests.post(url, json=data)
@@ -139,13 +143,13 @@ def create_influxdb_client_and_thread(influxdb_url: str = "", influxdb_token: st
                                      org=influxdb_org,
                                      retries=retries)
 
-    logger.debug(f'creation de l\'api orgs')
+    logger.debug('creation de l\'api orgs')
     orgs_api = influxdb_client.organizations_api()
     # Create organization
     org = orgs_api.create_organization(name=influxdb_org)
     logger.info(f'Organization {influxdb_org} created')
 
-    logger.debug(f'creation de l\'api bucket')
+    logger.debug('creation de l\'api bucket')
     buckets_api = influxdb_client.buckets_api()
     bucket_retention_seconds = None  # days * 86400  # Convert days to seconds
     if bucket_retention_seconds is None:
@@ -155,7 +159,7 @@ def create_influxdb_client_and_thread(influxdb_url: str = "", influxdb_token: st
 
     # create bucket
 
-    bucket = buckets_api.create_bucket(name=influxdb_bucket, org_id=org.id, retention_rules=retention_rules)
+    mybucket = buckets_api.create_bucket(name=influxdb_bucket, org_id=org.id, retention_rules=retention_rules)
     logger.info(f"Bucket '{influxdb_bucket}' dans l'organisation '{influxdb_org}' crée.")
 
   except InfluxDBError as exc:
@@ -167,11 +171,11 @@ def create_influxdb_client_and_thread(influxdb_url: str = "", influxdb_token: st
   point_settings.add_default_tag('location', linky_location)
   write_client = influxdb_client.write_api(write_options=SYNCHRONOUS, point_settings=point_settings)
   if write_client is None:
-    logger.error(f'Cannot create influxdb client. Ignoring that export.')
+    logger.error('Cannot create influxdb client. Ignoring that export.')
     influxdb_send_data = False
 
   # Démarrage du thread d'envoi vers InfluxDB
-  logger.info(f'Démarrage du thread d\'envoi vers InfluxDB')
+  logger.info('Démarrage du thread d\'envoi vers InfluxDB')
   send_influx_thread = Process(target=_send_frames_to_influx, args=(myframe_queue, influxdb_bucket, write_client),
                                daemon=True)
   send_influx_thread.start()
@@ -197,32 +201,41 @@ def create_file_client_and_thread(datafile, myframe_queue) -> tuple[io.TextIOWra
 #################################################################################################
 def create_mysql_client_and_thread(mysql_host: str = "", mysql_port: int = 3306, mysql_username: str = "",
                                    mysql_password: str = "", mysql_database: str = "",
-                                   myframe_queue: Queue = None):
+                                   myframe_queue: Queue = None, mysql_pool_size:int =5):
   # Connexion à mysql
+  config = {
+    'user': mysql_username,
+    'password': mysql_password,
+    'host': mysql_host,
+    'database': mysql_database,
+    'pool_reset_session': True
+  }
   try:
     # Obtention du client d'API en écriture
     logger.info(f'Connexion à {mysql_username}@{mysql_host}:{mysql_port}')
-    mycnx = mysql.connector.connect(host=mysql_host, user=mysql_username, password=mysql_password,
-                                    database=mysql_database)
+    # host=mysql_host, user=mysql_username, password=mysql_password, database=mysql_database,
+    cnxpool = mysql.connector.pooling.MySQLConnectionPool(pool_name='telepool', pool_size=mysql_pool_size, **config )
+    cnx = cnxpool.get_connection()
     f = ""
     for k in MYSQL_DB_DATATYPE.keys():
       f += f'`{k}` {MYSQL_DB_DATATYPE[k][0]},'
 
     logger.debug(f'table datatype: {f[:-1]}')
     logger.info(f'Creation de la table frame dans la bdd {mysql_database}')
-    mycursor = mycnx.cursor()
+    mycursor = cnx.cursor()
     mycursor.execute(f'CREATE TABLE IF NOT EXISTS frame ( {f[:-1]} );')
     mycursor.close()
+    cnx.close()
 
   except Exception as exc:
     logger.error(f'Erreur de connexion à mysql: {exc}')
     return None, None
 
   # Démarrage du thread d'envoi vers mysql
-  logger.info(f'Démarrage du thread d\'envoi vers mysql')
-  send_mysql_thread = Process(target=_send_frames_to_mysql, args=(mycnx, myframe_queue,), daemon=True)
+  logger.info('Démarrage du thread d\'envoi vers mysql')
+  send_mysql_thread = Process(target=_send_frames_to_mysql, args=(cnxpool, myframe_queue,), daemon=True)
   send_mysql_thread.start()
-  return mycnx, send_mysql_thread
+  return cnxpool, send_mysql_thread
 
 
 #################################################################################################
@@ -244,14 +257,10 @@ def on_publish(client, userdata, rc):
   # Qos=2 only once
   if userdata != None and rc != 0:
     logger.error(f'Error ({rc}) publishing data: {userdata} on client {client}')
-  pass
-
 
 def on_disconnect(client, userdata, rc):
   if userdata != None and rc != 0:
     logger.debug(f"return code: {rc}, client disconnected: {userdata} on client {client} ")
-  pass
-
 
 def create_mqtt_client_and_thread(mqtt_host: str = None, mqtt_port: int = 1883, mqtt_username: str = "",
                                   mqtt_password: str = "",
@@ -348,16 +357,25 @@ def _checksum(data, checksum):
   return (checksum == chr(s2))
 
 
-def _send_frames_to_file(file_frame_queue: Queue, file_client: io.TextIOWrapper = None):
-  logger.debug(f'Sending {file_frame_queue.qsize()} frame to file')
+def _send_frames_to_file(file_frame_queue: Queue, file_client: io.TextIOWrapper = None) -> None:
+  """
+  pop frames from queue, write to file
+
+  :param file_frame_queue: queue to pop obtaining frame
+  :param file_client: file handle where to write the frame
+  """
+  logger.info('Thread d\'envoi vers file démarré')
+
   if file_client is None:
     logger.error('Write client is None')
 
   while True:
-    framefile = file_frame_queue.get()
+    framefile = file_frame_queue.get(block=True)
+    logger.info(f'file queue size: {file_frame_queue.qsize()}, #frame: {len(framefile)}')
     fileline = ""
     save_the_date = ""
     if len(framefile) > 0:
+
       for label, value in framefile.items():
         fileline += f'{value};'
         # do not change value but save for time field.
@@ -375,70 +393,73 @@ def _send_frames_to_file(file_frame_queue: Queue, file_client: io.TextIOWrapper 
 
 def _send_frames_to_influx(influxdb_frame_queue: Queue = None, influxdb_bucket=None, write_client=None):
   """Ecrit les mesures dans un bucket InfluxDB."""
-  logger.debug(f'Thread d\'envoi vers InfluxDB démarré')
+
+  logger.info('Thread d\'envoi vers InfluxDB démarré')
+
   if write_client is None:
-    logger.error(f'influxdb client is not defined')
+    logger.error('influxdb client is not defined')
     influxdb_send_data = False
   else:
     influxdb_send_data = True
 
-  while True and influxdb_send_data:
+  while influxdb_send_data is True:
     # Récupère une trame dans la file d'attente
-    frameinflux = influxdb_frame_queue.get()
+    frameinflux = influxdb_frame_queue.get(block=True)
     logger.info(f'infludb queue size: {influxdb_frame_queue.qsize()}')
-    if 'TIME' in frameinflux.keys():
+    if 'TIME' not in frameinflux.keys():
+      logger.error('no Time in frameinflux, frame ignored')
+      logger.debug(f'frame: {frameinflux}')
+    else:
       ftime = frameinflux.pop('TIME')
       logger.debug(f'frame: {frameinflux}, time: {ftime}')
-    else:
-      logger.error('no Time in frameinflux')
-      logger.debug(f'frame: {frameinflux}')
 
-    record = []
-    for measure, value in frameinflux.items():
-      point = Point(measure).field('value', value).time(ftime)
-      record.append(point)
+      record = []
+      for measure, value in frameinflux.items():
+        point = Point(measure).field('value', value).time(ftime)
+        record.append(point)
 
-    # Envoie vers InfluxDB et ré-essaie en boucle tant que cela ne fonctionne pas
-    logger.info('Ecriture dans InfluxDB')
-    written = False
-    x = 0
-    while not written:
-      try:
-        write_client.write(bucket=influxdb_bucket, record=record)
-        written = True
-      except ApiException as exc:
-        if exc.status == 404:
-          logger.error(f'Le bucket {influxdb_bucket} n\'existe pas')
-        elif exc.status == 403:
-          logger.error(f'Permissions insufissantes pour écrire dans {influxdb_bucket}')
-        else:
-          logger.error(f'Erreur lors de l\'écriture dans {influxdb_bucket}')
-      except InfluxDBError as exc:
-        logger.error(f'Erreur InfluxDB: {exc}', exc_info=True)
-      except (OSError, HTTPError) as exc:
-        logger.error(f'Serveur injoignable: {exc}', exc_info=True)
-      finally:
-        if not written:
-          # Attends de plus en plus longtemps
-          sleep = 2 ** x
-          logger.error(f'Nouvel essai dans {sleep} seconde(s)')
-          time.sleep(2 ** x)
-          # Mais pas trop quand même. max = 2**10 secondes, soit environ 17 minutes
-          if x < 10:
-            x += 1
+      # Envoie vers InfluxDB et ré-essaie en boucle tant que cela ne fonctionne pas
+      logger.info('Ecriture dans InfluxDB')
+      written = False
+      x = 0
+      while not written:
+        try:
+          write_client.write(bucket=influxdb_bucket, record=record)
+          written = True
+        except ApiException as exc:
+          if exc.status == 404:
+            logger.error(f'Le bucket {influxdb_bucket} n\'existe pas')
+          elif exc.status == 403:
+            logger.error(f'Permissions insufissantes pour écrire dans {influxdb_bucket}')
+          else:
+            logger.error(f'Erreur lors de l\'écriture dans {influxdb_bucket}')
+        except InfluxDBError as exc:
+          logger.error(f'Erreur InfluxDB: {exc}', exc_info=True)
+        except (OSError, HTTPError) as exc:
+          logger.error(f'Serveur injoignable: {exc}', exc_info=True)
+        finally:
+          if not written:
+            # Attends de plus en plus longtemps
+            sleep = 2 ** x
+            logger.error(f'Nouvel essai dans {sleep} seconde(s)')
+            time.sleep(2 ** x)
+            # Mais pas trop quand même. max = 2**10 secondes, soit environ 17 minutes
+            if x < 10:
+              x += 1
 
     # influxdb_frame_queue.task_done()
 
 
-def _send_frames_to_mysql(mycnx: PooledMySQLConnection = None, mysqlframe_queue: Queue = None):
+def _send_frames_to_mysql(mysqlpool:mysql.connector.pooling.MySQLConnectionPool  = None, mysqlframe_queue: Queue = None):
   """
   /  enregistre les valeurs trouvées pour les 37 tags
   :return:
   """
+  logger.info('Thread d\'envoi vers mysql démarré')
 
-  while True and mysql_send_data:
+  while mysql_send_data is True:
     framemysql = mysqlframe_queue.get(block=True)
-    logger.info(f'mysql queue size: {mysqlframe_queue.qsize()}, frame: {len(framemysql)}')
+    logger.info(f'mysql queue size: {mysqlframe_queue.qsize()}, frame: {len(framemysql)}, pool: {mysqlpool.pool_size}')
     tcolumns = ""
     tvalues = []
     tformat = ""
@@ -464,27 +485,51 @@ def _send_frames_to_mysql(mycnx: PooledMySQLConnection = None, mysqlframe_queue:
       tcolumns = tcolumns[:-1]
       tformat = tformat[:-1]
       logger.debug(f'tcolumns: {len(tcolumns.split(","))}, {tcolumns}, tvalues: {len(tvalues)},{tvalues}')
+
       try:
         insert_stmt = (
           f'INSERT INTO frame ({tcolumns}) '
           f'VALUES ({tformat})'
         )
+        mycnx = mysqlpool.get_connection()
+        if not mycnx.is_connected():
+          mycnx.connect()
         with mycnx.cursor() as mycursor:
           mycursor.execute(insert_stmt, tvalues)
           mycnx.commit()
-      except mysql.connector.errors.ProgrammingError as exc:
+      except ( ConnectionRefusedError, mysql.connector.errors.ConnectionTimeoutError) as e:
+        mysqlframe_queue.put(framemysql)
+        logger.error(f'Cannot connect to mysql: {mysqlpool.pool_name}, {mysqlpool.__getstate__()}')
+        time.sleep(5)
+      except (mysql.connector.errors.ProgrammingError,
+              mysql.connector.errors.InterfaceError,
+              mysql.connector.errors.DatabaseError,
+              mysql.connector.errors.DataError) as exc:
+        mysqlframe_queue.put(framemysql)
+        logger.error('Put frame back to queue')
+        logger.debug(f'Put frame back to queue: {framemysql}')
         logger.error(
           f'Erreur MySQL insert: {len(tcolumns.split(","))} {tcolumns} ## {len(tformat.split(","))} {tformat} ## {len(tvalues)}{tvalues}')
         logger.error(f'Erreur MySQL insert: {exc}', exc_info=True)
+        time.sleep(5)
       except Exception as e:
+        mysqlframe_queue.put(framemysql)
+        logger.error('Put frame back to queue')
+        logger.debug(f'Put frame back to queue: {framemysql}')
         logger.error(
           f'Erreur MySQL insert: {len(tcolumns.split(","))} {tcolumns} ## {len(tformat.split(","))} {tformat} ## {len(tvalues)}{tvalues}')
         logger.error(f'Erreur MySQL: {e}', exc_info=True)
-
+        # wait for the server to be up
+        time.sleep(5)
+      finally:
+        if mycnx is not None and mycnx.is_connected():
+          mycnx.close()
+          mysqlpool
 
 def format_payload_for_teleinfo_jeedom(frame: {} = {}) -> str:
   output_string = {}
-  payload = {k: v for k, v in frame.items()}
+  #payload = {k: v for k, v in frame.items()}
+  payload = dict(frame.items())
   output_string['TIC'] = payload
   logger.debug(f'output_string: {output_string}')
   return json.dumps(output_string)
@@ -492,7 +537,10 @@ def format_payload_for_teleinfo_jeedom(frame: {} = {}) -> str:
 
 def _send_frames_to_mqtt(mymqttclient: mqtt_client = None, myframe_queue: Queue = None, mqtt_topic: str = "linky",
                          mqtt_qos: int = 0, mqtt_retain: bool = False):
-  while True and mqtt_send_data:
+
+  logger.info('Thread d\'envoi vers mqtt démarré')
+
+  while mqtt_send_data is True:
     framemqtt = myframe_queue.get()
     logger.info(f'mqtt queue size: {myframe_queue.qsize()}')
     # la trame n'est pas vide
@@ -524,19 +572,29 @@ def linky_decode_date(value: str = ""):
     minute = int(value[9:11])
     sec = int(value[11:])
     dt = datetime(year=annee, month=mois, day=jour, hour=heure, minute=minute, second=sec)
+    if saison.lower() not in ['e', 'h' ]:
+      logger.error(f'Compteur en mode dégradé pour l\'heure: {saison}')
+    logger.debug(
+      f'val: {value}, s: {saison}, a:{annee}, m:{mois}, j:{jour}, h:{heure}, m:{minute}, s:{sec}, dt: {dt}/{dt.strftime(format="%Y-%m-%d %H:%M:%S")}')
   except ValueError as e:
-    logger.debug(f'value:{value} => {e}')
+    logger.debug(f'Cannot parse date: {e}, value:{value}')
     dt = datetime.now()
 
-  logger.debug(
-    f'val: {value}, s: {saison}, a:{annee}, m:{mois}, j:{jour}, h:{heure}, m:{minute}, s:{sec}, dt: {dt}/{dt.strftime(format="%Y-%m-%d %H:%M:%S")}')
-
-  if saison in ['e', 'h', ' ']:
-    logger.error(f'Compteur en mode dégradé pour l\'heure: {saison}')
   return dt.strftime(format="%Y-%m-%d %H:%M:%S")
 
 
 def linky_decode_status(hex_str: str = ""):
+
+  raisons_coupure = {
+    0: 'fermé',
+    1: 'ouvert sur surpuissance',
+    2: 'ouvert sur surtension',
+    3: 'ouvert sur délestage',
+    4: 'ouvert sur ordre CPL ou Euridis',
+    5: 'ouvert sur surchauffe (courant > courant max)',
+    6: 'ouvert sur surchauffe (courant < courant max)'
+  }
+
   if len(hex_str) != 8:
     raise ValueError("Le registre doit contenir exactement 8 caractères hexadécimaux.")
 
@@ -550,15 +608,7 @@ def linky_decode_status(hex_str: str = ""):
 
   # Bits 1 à 3 : organe de coupure
   organe_coupure = (registre >> 1) & 0b111
-  raisons_coupure = {
-    0: 'fermé',
-    1: 'ouvert sur surpuissance',
-    2: 'ouvert sur surtension',
-    3: 'ouvert sur délestage',
-    4: 'ouvert sur ordre CPL ou Euridis',
-    5: 'ouvert sur surchauffe (courant > courant max)',
-    6: 'ouvert sur surchauffe (courant < courant max)'
-  }
+
   resultats['Organe de coupure'] = raisons_coupure.get(organe_coupure, 'inconnu')
 
   # Bit 4 : état du cache-bornes distributeur
@@ -683,11 +733,12 @@ def linky_decode_status(hex_str: str = ""):
 
 def process_teleinfo(bytes: bytes = None):
   # Initialisation d'une trame vide
-  frame = dict()
+  frame = {}
 
   # un caractère "Line Feed" LF (0x0 A) indiquant le début du groupe => split sur ce separateur.
   datasets = list(filter(lambda x: len(x) > 1, bytes.split(b'\n')))
-  tagsdataset = list(map(lambda x: x.decode('ascii').strip('\r').split()[0], datasets))
+  #tagsdataset = list(map(lambda x: x.decode('ascii').strip('\r').split()[0], datasets))
+  tagsdataset = [ x.decode('ascii').strip('\r').split()[0] for x in datasets ]
 
   logger.debug(f'#datasets: {len(datasets)}, tagsdataset: {len(tagsdataset)},{tagsdataset}')
 
@@ -846,18 +897,20 @@ def linky(log_level=logging.INFO):
         'Vous devez vous déconnecter de votre session puis vous reconnecter pour que les droits prennent effet.')
     else:
       logger.error(f'Erreur lors de l\'ouverture du port série : {exc}')
-    ser.close()
+    if ser is not None:
+      ser.close()
     raise SystemExit(1)
 
   except termios.error as e:
     logger.error(f'Erreur lors de la configuration du port série: {e}')
     if raspberry_stty_port == '/dev/ttyS0':
       logger.error('Essayez d\'utiliser /dev/ttyAMA0 plutôt que /dev/ttyS0')
-    ser.close()
+    if ser is not None:
+      ser.close()
     raise SystemExit(1)
 
   except IndexError as e:
-    logger.error(f'Erreur lors du traitement de la trame.')
+    logger.error('Erreur lors du traitement de la trame.')
 
   finally:
     ser.close()
@@ -948,8 +1001,8 @@ if __name__ == '__main__':
   linky_location = os.getenv('CITY', 'Paris')
   linky_legacy_mode = os.getenv('LEGACY', False) in ('true', '1', 't')
   linky_ignore_checksum_for_keys = os.getenv('IGNORE_KEYS_CHEKSUM', '[]')
-  linky_keys = list(map(lambda x: x.strip(), os.getenv('KEYS', "ISOUSC BASE IINST").split(',')))
-  # linky_keys = [ x.strip() for x in os.getenv('KEYS', "ISOUSC BASE IINST").split(',') ]
+  #linky_keys = list(map(lambda x: x.strip(), os.getenv('KEYS', "ISOUSC BASE IINST").split(',')))
+  linky_keys = [ x.strip() for x in os.getenv('KEYS', "ISOUSC BASE IINST").split(',') ]
   linky_sleep_interval = int(os.getenv('SLEEP_INTERVAL', DEFAULT_INTERVAL))
   raspberry_stty_port = os.getenv('PORT', 'ttyS0').replace("/dev/", "")
   # define SINSTS_PERCENT_CHANGE from env
@@ -1001,13 +1054,15 @@ if __name__ == '__main__':
     mysql_username = os.getenv('MYSQL_USERNAME', '')
     mysql_password = os.getenv('MYSQL_PASSWORD', '')
     mysql_database = os.getenv('MYSQL_DB', 'linky')
+    mysql_pool_size = int(os.getenv('MYSQL_POOL_SIZE', '10'))
     # Création d'une queue FIFO pour stocker les données
     frame_mysql_queue = Queue()
     mysql_client, send_mysql_thread = create_mysql_client_and_thread(mysql_host=mysql_host, mysql_port=mysql_port,
                                                                      mysql_username=mysql_username,
                                                                      mysql_password=mysql_password,
                                                                      mysql_database=mysql_database,
-                                                                     myframe_queue=frame_mysql_queue)
+                                                                     myframe_queue=frame_mysql_queue,
+                                                                     mysql_pool_size=mysql_pool_size)
   if mqtt_send_data:
     mqtt_host = os.getenv('MQTT_HOST', 'localhost')
     mqtt_port = int(os.getenv('MQTT_PORT', 1883))
@@ -1016,7 +1071,7 @@ if __name__ == '__main__':
     mqtt_topic = os.getenv('MQTT_TOPIC', 'linky')
     mqtt_retain = os.getenv('MQTT_RETAIN', False) in ('true', '1', 't')
     mqtt_qos = int(os.getenv('MQTT_QOS', 0))
-    mytls = dict()
+    mytls = {}
     mytls['mqtt_tls'] = os.getenv('MQTT_TLS', False)
     mytls['mqtt_tls_insecure'] = os.getenv('MQTT_TLS_INSECURE', 'False') in ('true', '1', 't')
     mytls['mqtt_tls_ca'] = os.getenv('MQTT_TLS_CA', '')
