@@ -37,7 +37,9 @@ RUN apk add --no-cache bash doas tzdata supervisor mariadb-common mariadb-client
     && sed -i "s#;nodaemon=false#nodaemon=true#" /etc/supervisord.conf \
     && sed -i "s#;loglevel=info#loglevel=info#" /etc/supervisord.conf \
     && chmod 444 /etc/supervisord.conf \
-    && pip3 install --break-system-packages influxdb-client mysql-connector-python http-plot-server
+    && pip3 install --break-system-packages influxdb-client mysql-connector-python http-plot-server \
+    && sed -i 's#https://qbee.io/wp-content/uploads/2022/02/logo_qbee_actualsize.png#https://www.app.qbee.io/assets/img/qbee-logo-horizontal.png#' /usr/lib/python3.12/site-packages/plot_server/plotly/minimal.html \
+    && sed -i 's#https://qbee.io/wp-content/uploads/2022/03/bg_grid_white.png#https://www.app.qbee.io/assets/img/bg_grid_white.png#' /usr/lib/python3.12/site-packages/plot_server/plotly/minimal.html
 
 RUN adduser --disabled-password --gecos "" --home "$(pwd)" \
     --ingroup "www-data" --no-create-home --uid "123456"  www-data \
