@@ -1,5 +1,7 @@
 FROM alpine:3.23
 
+ARG PYVER=3.12
+
 ENV DEBUG=false \
     QUIET=false \
     TZDATA="Europe/Paris" \
@@ -37,9 +39,7 @@ RUN apk add --no-cache bash doas tzdata supervisor mariadb-common mariadb-client
     && sed -i "s#;nodaemon=false#nodaemon=true#" /etc/supervisord.conf \
     && sed -i "s#;loglevel=info#loglevel=info#" /etc/supervisord.conf \
     && chmod 444 /etc/supervisord.conf \
-    && pip3 install --break-system-packages influxdb-client mysql-connector-python http-plot-server \
-    && sed -i 's#https://qbee.io/wp-content/uploads/2022/02/logo_qbee_actualsize.png#https://www.app.qbee.io/assets/img/qbee-logo-horizontal.png#' /usr/lib/python3.12/site-packages/plot_server/plotly/minimal.html \
-    && sed -i 's#https://qbee.io/wp-content/uploads/2022/03/bg_grid_white.png#https://www.app.qbee.io/assets/img/bg_grid_white.png#' /usr/lib/python3.12/site-packages/plot_server/plotly/minimal.html
+    && pip3 install --break-system-packages influxdb-client mysql-connector-python http-plot-server
 
 RUN adduser --disabled-password --gecos "" --home "$(pwd)" \
     --ingroup "www-data" --no-create-home --uid "123456"  www-data \
@@ -49,9 +49,10 @@ RUN adduser --disabled-password --gecos "" --home "$(pwd)" \
     && echo 'permit nopass :wheel as root' > /etc/doas.d/doas.conf
 RUN if [ "false" != ${DEBUG:-"false"} ]; then apk add bash vim; fi ;
 
-ADD --chmod=755 /src/linky/daily_update_graph.sh /etc/periodic/daily/
-ADD --chown=myuser:users --chmod=750 /src/linky/ /app/
-ADD --chmod=644 /src/etc/ /etc/
+COPY --chmod=0644 --chown=root:root /src/html/plotly_minimal.html /usr/lib/python${PYVER}/site-packages/plot_server/plotly/minimal.html
+COPY --chmod=755 /src/linky/daily_update_graph.sh /etc/periodic/daily/
+COPY --chown=myuser:users --chmod=750 /src/linky/ /app/
+COPY --chmod=644 /src/etc/ /etc/
 
 CMD [ "/usr/bin/supervisord", "-c", "/etc/supervisord.conf"]
 #ENTRYPOINT ["/app/entrypoint.sh"]
