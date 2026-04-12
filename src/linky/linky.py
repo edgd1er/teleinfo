@@ -912,8 +912,10 @@ def linky(log_level=logging.INFO):
   except IndexError as e:
     logger.error('Erreur lors du traitement de la trame.')
 
+
   finally:
-    ser.close()
+    if ser is not None:
+      ser.close()
 
 
 def should_emit(tag: dict, sinsts_percent_change:float=1, sleep_interval:int=60) -> bool:
