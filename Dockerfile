@@ -1,8 +1,10 @@
 FROM alpine:3.23
 
 ARG PYVER=3.12
+ARG DEBUG
 
-ENV DEBUG=false \
+ENV ENV='/root/.profile' \
+    DEBUG=false \
     QUIET=false \
     TZDATA="Europe/Paris" \
     CITY="Paris" \
@@ -33,11 +35,14 @@ ENV DEBUG=false \
     IGNORE_KEYS_CHEKSUM="[]"
 
 # TODO: Setuptools<81
-RUN apk add --no-cache bash doas tzdata supervisor mariadb-common mariadb-client mariadb-connector-c \
-    py3-mysqlclient python3 py3-pip gettext py3-pyserial py3-yaml py3-influxdb py3-paho-mqtt \
+RUN if [ $(echo ${DEBUG,,} | grep -ic 'true') -ne 0 ];then TOOLS="vim bind-tools"; fi \
+    && apk add --update --no-cache bash doas tzdata supervisor mariadb-common mariadb-client mariadb-connector-c \
+    py3-mysqlclient python3 py3-pip gettext py3-pyserial py3-yaml py3-influxdb py3-paho-mqtt ${TOOLS:-}\
     && cp /etc/supervisord.conf /etc/supervisord.conf.package \
     && sed -i "s#;nodaemon=false#nodaemon=true#" /etc/supervisord.conf \
     && sed -i "s#;loglevel=info#loglevel=info#" /etc/supervisord.conf \
+    && echo "alias ll='ls -alh'" >> ~/.profile \
+    && echo "alias modhtml='vim /usr/lib/python3.*/site-packages/plot_server/plotly/minimal.html'" >> ~/.profile \
     && chmod 444 /etc/supervisord.conf \
     && pip3 install --break-system-packages influxdb-client mysql-connector-python http-plot-server
 
@@ -47,7 +52,6 @@ RUN adduser --disabled-password --gecos "" --home "$(pwd)" \
     && addgroup myuser dialout \
     && echo 'myuser:123' | chpasswd \
     && echo 'permit nopass :wheel as root' > /etc/doas.d/doas.conf
-RUN if [ "false" != ${DEBUG:-"false"} ]; then apk add bash vim; fi ;
 
 COPY --chmod=0644 --chown=root:root /src/html/plotly_minimal.html /usr/lib/python${PYVER}/site-packages/plot_server/plotly/minimal.html
 COPY --chmod=755 /src/linky/daily_update_graph.sh /etc/periodic/daily/
