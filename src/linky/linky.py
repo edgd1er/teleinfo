@@ -1007,6 +1007,15 @@ if __name__ == '__main__':
   linky_keys = [ x.strip() for x in os.getenv('KEYS', "ISOUSC BASE IINST").split(',') ]
   linky_sleep_interval = int(os.getenv('SLEEP_INTERVAL', DEFAULT_INTERVAL))
   raspberry_stty_port = os.getenv('PORT', 'ttyS0').replace("/dev/", "")
+
+  if 'null' == raspberry_stty_port :
+    logger.error(f'Device is null {raspberry_stty_port}, exiting.')
+    exit(0)
+
+  if not os.stat(f'/dev/{raspberry_stty_port}').st_mode :
+    logger.error(f'Device not found {raspberry_stty_port}, exiting.')
+    exit(0)
+
   # define SINSTS_PERCENT_CHANGE from env
   try:
     SINSTS_PERCENT_CHANGE = float(os.getenv('SINSTS_PERCENT_CHANGE', .5))
