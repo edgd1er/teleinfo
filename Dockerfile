@@ -1,6 +1,7 @@
-FROM alpine:3.23
+ARG ALPVER=3.23
+FROM alpine:${ALPVER}
 
-ARG PYVER=3.12
+ARG PYVER=3.14
 ARG DEBUG
 
 ENV ENV='/root/.profile' \
@@ -37,11 +38,11 @@ ENV ENV='/root/.profile' \
 # TODO: Setuptools<81
 RUN if [ $(echo ${DEBUG,,} | grep -ic 'true') -ne 0 ];then TOOLS="vim bind-tools"; fi \
     && apk add --update --no-cache bash doas tzdata supervisor mariadb-common mariadb-client mariadb-connector-c \
-    py3-mysqlclient python3 py3-pip gettext py3-pyserial py3-yaml py3-influxdb py3-paho-mqtt ${TOOLS:-}\
+    py3-mysqlclient python3~${PYVER} py3-pip gettext py3-pyserial py3-yaml py3-influxdb py3-paho-mqtt ${TOOLS:-}\
     && cp /etc/supervisord.conf /etc/supervisord.conf.package \
     && sed -i "s#;nodaemon=false#nodaemon=true#" /etc/supervisord.conf \
     && sed -i "s#;loglevel=info#loglevel=info#" /etc/supervisord.conf \
-    && echo "alias ll='ls -alh'" >> ~/.profile \
+    && echo "alias ll='ls -alh'" >> ~/.bash_aliases \
     && echo "alias modhtml='vim /usr/lib/python3.*/site-packages/plot_server/plotly/minimal.html'" >> ~/.profile \
     && chmod 444 /etc/supervisord.conf \
     && pip3 install --break-system-packages influxdb-client mysql-connector-python http-plot-server
@@ -51,7 +52,8 @@ RUN adduser --disabled-password --gecos "" --home "$(pwd)" \
     && adduser myuser -D -G wheel \
     && addgroup myuser dialout \
     && echo 'myuser:123' | chpasswd \
-    && echo 'permit nopass :wheel as root' > /etc/doas.d/doas.conf
+    && echo 'permit nopass :wheel as root' > /etc/doas.d/doas.conf \
+    && echo 'alias ll="ls -al"' >>~/.bash_aliases
 
 COPY --chmod=0644 --chown=root:root /src/html/plotly_minimal.html /usr/lib/python${PYVER}/site-packages/plot_server/plotly/minimal.html
 COPY --chmod=755 /src/linky/daily_update_graph.sh /etc/periodic/daily/
